@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import yaml
@@ -123,8 +124,16 @@ class TwitchSettings(StrictModel):
 class ProjectPaths(StrictModel):
     token: Path
     twitch_token: Path = Path(".local/secrets/twitch-token.bin")
+    llm_api_key: Path = Path(".local/secrets/llama-server-api-key.txt")
     inventory: Path
     actions: Path
+    llama_server: Path = Path(".local/runtime/llama.cpp/llama-server.exe")
+    llm_model: Path = Path("models/gemma-4-12b-it-qat-q4_0.gguf")
+    llm_server_state: Path = Path(".local/state/llama-server.json")
+    llm_benchmarks: Path = Path(".local/benchmarks")
+    llm_evaluation_cases: Path = Path(
+        "tests/fixtures/traditional_chinese_chat_cases.json"
+    )
 
 
 class DiscoverySettings(StrictModel):
@@ -137,9 +146,109 @@ class LoggingSettings(StrictModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
 
+class LLMSettings(StrictModel):
+    base_url: str = "http://127.0.0.1:8080/v1"
+    runtime_release: str = "b10621"
+    runtime_commit: str = "c1d0e7a004015f23bc0233470b747b596f29b264"
+    runtime_backend: str = "CUDA 12.4"
+    model: str = Field(
+        default="gemma-4-12b-it-qat-q4_0",
+        min_length=1,
+        max_length=128,
+    )
+    model_repository: str = "google/gemma-4-12B-it-qat-q4_0-gguf"
+    model_revision: str = "29d097773436b69ff9feafd636ab4cf873786537"
+    model_sha256: str = (
+        "93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b"
+    )
+    quantization: str = "QAT Q4_0"
+    license: str = "Apache-2.0"
+    request_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    max_tokens: int = Field(default=192, ge=32, le=512)
+    temperature: float = Field(default=1.0, ge=0, le=2)
+    top_p: float = Field(default=0.95, gt=0, le=1)
+    top_k: int = Field(default=64, ge=1, le=200)
+    seed: int = Field(default=42, ge=-1)
+    context_size: int = Field(default=4_096, ge=1_024, le=32_768)
+    gpu_layers: int = Field(default=24, ge=0, le=200)
+    threads: int = Field(default=12, ge=1, le=128)
+    batch_threads: int = Field(default=12, ge=1, le=128)
+    character_name: str = Field(default="NightRain", min_length=1, max_length=64)
+    persona: str = Field(
+        default=(
+            "像熟悉聊天室的台灣實況主，使用自然、簡短的繁體中文，"
+            "不使用翻譯腔或客服口吻。"
+        ),
+        min_length=20,
+        max_length=1_000,
+    )
+    allowed_emotions: tuple[str, ...] = (
+        "neutral",
+        "happy",
+        "amused",
+        "surprised",
+        "concerned",
+        "angry",
+    )
+    allowed_actions: tuple[str, ...] = ("continuous_test",)
+    action_descriptions: dict[str, str] = {
+        "continuous_test": "做一次輕微的上下點頭",
+    }
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_local_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if parsed.scheme != "http":
+            raise ValueError("LLM base_url must use local loopback HTTP")
+        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("LLM base_url must use a local loopback host")
+        if parsed.port is None:
+            raise ValueError("LLM base_url must include an explicit local port")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("LLM base_url must not contain credentials or query data")
+        return normalized
+
+    @field_validator("allowed_emotions", "allowed_actions")
+    @classmethod
+    def validate_allowlist(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("LLM allowlists must not be empty")
+        if len(set(value)) != len(value):
+            raise ValueError("LLM allowlists must not contain duplicates")
+        for name in value:
+            if (
+                not name
+                or not name.replace("_", "").isalnum()
+                or not name[0].isalpha()
+            ):
+                raise ValueError(
+                    f"Invalid LLM allowlist name {name!r}; use letters, numbers, "
+                    "and underscores"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def validate_action_descriptions(self) -> LLMSettings:
+        if set(self.action_descriptions) != set(self.allowed_actions):
+            raise ValueError(
+                "LLM action_descriptions keys must exactly match allowed_actions"
+            )
+        if any(
+            not description.strip() or len(description) > 100
+            for description in self.action_descriptions.values()
+        ):
+            raise ValueError(
+                "LLM action descriptions must contain 1 to 100 characters"
+            )
+        return self
+
+
 class AppConfig(StrictModel):
     vts: VTSSettings
     twitch: TwitchSettings = Field(default_factory=TwitchSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     paths: ProjectPaths
     discovery: DiscoverySettings
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -292,6 +401,10 @@ class LoadedAppConfig:
         return self.resolve(self.data.paths.twitch_token)
 
     @property
+    def llm_api_key_path(self) -> Path:
+        return self.resolve(self.data.paths.llm_api_key)
+
+    @property
     def twitch_client_id(self) -> str | None:
         value = os.environ.get("TWITCH_CLIENT_ID") or self.data.twitch.client_id
         normalized = value.strip() if value else ""
@@ -315,6 +428,26 @@ class LoadedAppConfig:
     @property
     def actions_path(self) -> Path:
         return self.resolve(self.data.paths.actions)
+
+    @property
+    def llama_server_path(self) -> Path:
+        return self.resolve(self.data.paths.llama_server)
+
+    @property
+    def llm_model_path(self) -> Path:
+        return self.resolve(self.data.paths.llm_model)
+
+    @property
+    def llm_server_state_path(self) -> Path:
+        return self.resolve(self.data.paths.llm_server_state)
+
+    @property
+    def llm_benchmarks_path(self) -> Path:
+        return self.resolve(self.data.paths.llm_benchmarks)
+
+    @property
+    def llm_evaluation_cases_path(self) -> Path:
+        return self.resolve(self.data.paths.llm_evaluation_cases)
 
 
 def _read_yaml_mapping(path: Path) -> dict[str, object]:

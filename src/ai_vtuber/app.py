@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 import sys
 import time
 from collections.abc import Awaitable
+from dataclasses import asdict
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
@@ -21,6 +23,22 @@ from ai_vtuber.config import (
     write_actions_config,
 )
 from ai_vtuber.logging_setup import configure_logging
+from ai_vtuber.llm.benchmark import (
+    build_benchmark_report,
+    default_report_path,
+    write_benchmark_report,
+)
+from ai_vtuber.llm.client import LLMError, LlamaServerClient
+from ai_vtuber.llm.evaluation import evaluate_cases, load_evaluation_cases
+from ai_vtuber.llm.prompts import build_system_prompt
+from ai_vtuber.llm.resources import ResourceSampler
+from ai_vtuber.llm.runtime import (
+    read_server_api_key,
+    read_server_state,
+    run_server,
+    verify_model_sha256,
+)
+from ai_vtuber.llm.schema import LLMOutputContract, LLMOutputRejected
 from ai_vtuber.twitch.auth import (
     DeviceAuthorization,
     TwitchAuth,
@@ -58,6 +76,15 @@ Result = TypeVar("Result")
 
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _configure_console_encoding() -> None:
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
 
 
 def _vts_online(url: str, timeout: float = 0.3) -> bool:
@@ -106,6 +133,17 @@ def health_report(config: LoadedAppConfig) -> dict[str, object]:
             "token_present": config.twitch_token_path.exists(),
             "token_storage": "windows_dpapi",
             "scopes": list(config.data.twitch.scopes),
+        },
+        "llm": {
+            "base_url": config.data.llm.base_url,
+            "runtime_present": config.llama_server_path.is_file(),
+            "model_present": config.llm_model_path.is_file(),
+            "model": config.data.llm.model,
+            "quantization": config.data.llm.quantization,
+            "license": config.data.llm.license,
+            "decisions": ["reply", "react_only", "ignore"],
+            "allowed_emotions": list(config.data.llm.allowed_emotions),
+            "allowed_actions": list(config.data.llm.allowed_actions),
         },
         "local_state": {
             "token_present": config.token_path.exists(),
@@ -271,6 +309,194 @@ def _build_eventsub(
         maxsize=config.data.twitch.message_queue_size
     )
     return EventSubClient(config.data.twitch, auth, helix, queue), queue
+
+
+def _build_llm_contract(config: LoadedAppConfig) -> LLMOutputContract:
+    actions = load_actions_config(config.actions_path)
+    try:
+        return LLMOutputContract.from_action_config(
+            allowed_emotions=config.data.llm.allowed_emotions,
+            allowed_actions=config.data.llm.allowed_actions,
+            actions_config=actions,
+        )
+    except ValueError as error:
+        raise ConfigError(f"Invalid LLM whitelist: {error}") from error
+
+
+def _build_llm_prompt(
+    config: LoadedAppConfig,
+    contract: LLMOutputContract,
+) -> str:
+    return build_system_prompt(
+        character_name=config.data.llm.character_name,
+        persona=config.data.llm.persona,
+        contract=contract,
+        action_descriptions=config.data.llm.action_descriptions,
+    )
+
+
+def _build_llm_client(
+    config: LoadedAppConfig,
+    http_client: httpx.AsyncClient,
+) -> LlamaServerClient:
+    return LlamaServerClient(
+        config.data.llm,
+        http_client,
+        api_key=read_server_api_key(config.llm_api_key_path),
+    )
+
+
+async def _llm_status_command(config: LoadedAppConfig) -> int:
+    contract = _build_llm_contract(config)
+    actual_sha256 = verify_model_sha256(
+        config.llm_model_path,
+        config.data.llm.model_sha256,
+    )
+    async with httpx.AsyncClient() as http_client:
+        client = _build_llm_client(config, http_client)
+        server_health = await client.health()
+    _print_json(
+        {
+            "status": "ready",
+            "server": server_health,
+            "runtime": {
+                "path": str(config.llama_server_path),
+                "present": config.llama_server_path.is_file(),
+                "release": config.data.llm.runtime_release,
+                "commit": config.data.llm.runtime_commit,
+                "backend": config.data.llm.runtime_backend,
+            },
+            "model": {
+                "api_name": config.data.llm.model,
+                "repository": config.data.llm.model_repository,
+                "revision": config.data.llm.model_revision,
+                "quantization": config.data.llm.quantization,
+                "license": config.data.llm.license,
+                "path": str(config.llm_model_path),
+                "present": config.llm_model_path.is_file(),
+                "size_bytes": (
+                    config.llm_model_path.stat().st_size
+                    if config.llm_model_path.is_file()
+                    else None
+                ),
+                "sha256": actual_sha256,
+                "sha256_verified": True,
+            },
+            "contract": {
+                "decisions": ["reply", "react_only", "ignore"],
+                "emotions": list(contract.allowed_emotions),
+                "actions": list(contract.allowed_actions),
+            },
+        }
+    )
+    return 0
+
+
+async def _llm_chat_command(
+    config: LoadedAppConfig,
+    *,
+    message: str,
+) -> int:
+    contract = _build_llm_contract(config)
+    prompt = _build_llm_prompt(config, contract)
+    async with httpx.AsyncClient() as http_client:
+        client = _build_llm_client(config, http_client)
+        await client.health()
+        generation = await client.generate(
+            message,
+            system_prompt=prompt,
+            contract=contract,
+        )
+    _print_json(
+        {
+            "output": generation.output.model_dump(mode="json"),
+            "metrics": asdict(generation.metrics),
+        }
+    )
+    return 0
+
+
+async def _llm_benchmark_command(
+    config: LoadedAppConfig,
+    *,
+    cases_path: Path | None,
+    output_path: Path | None,
+    server_pid: int | None,
+    minimum_schema_rate: float,
+) -> int:
+    if not 0 <= minimum_schema_rate <= 1:
+        raise ConfigError("--minimum-schema-rate must be between zero and one")
+    resolved_cases = (
+        config.llm_evaluation_cases_path
+        if cases_path is None
+        else config.resolve(cases_path)
+    )
+    cases = load_evaluation_cases(resolved_cases)
+    if len(cases) < 100:
+        raise ConfigError("Phase 3 benchmark requires at least 100 chat cases")
+
+    contract = _build_llm_contract(config)
+    prompt = _build_llm_prompt(config, contract)
+    state = read_server_state(config.llm_server_state_path)
+    measured_pid = server_pid if server_pid is not None else (state.pid if state else None)
+    if measured_pid is not None and measured_pid <= 0:
+        raise ConfigError("--server-pid must be greater than zero")
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_llm_client(config, http_client)
+        await client.health()
+        async with ResourceSampler(
+            server_pid=measured_pid,
+            vts_probe=lambda: _vts_online(config.data.vts.url),
+        ) as resources:
+            evaluation = await evaluate_cases(
+                client,
+                cases,
+                system_prompt=prompt,
+                contract=contract,
+                progress=lambda completed, total: (
+                    print(
+                        f"benchmark: {completed}/{total}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if completed % 10 == 0 or completed == total
+                    else None
+                ),
+            )
+
+    resolved_output = (
+        default_report_path(config.llm_benchmarks_path)
+        if output_path is None
+        else config.resolve(output_path)
+    )
+    payload = build_benchmark_report(
+        evaluation,
+        settings=config.data.llm,
+        model_path=config.llm_model_path,
+        resource_summary=resources.summary(),
+        server_pid=measured_pid,
+    )
+    write_benchmark_report(resolved_output, payload)
+    summary = payload["summary"]
+    _print_json(
+        {
+            "status": "passed"
+            if evaluation.accepted / evaluation.total >= minimum_schema_rate
+            else "below_threshold",
+            "report": str(resolved_output),
+            "summary": summary,
+            "resources": payload["resources"],
+            "vts_online_during_benchmark": payload["environment"][
+                "vts_online_during_benchmark"
+            ],
+        }
+    )
+    return (
+        0
+        if evaluation.accepted / evaluation.total >= minimum_schema_rate
+        else 2
+    )
 
 
 async def _twitch_listen_command(
@@ -477,7 +703,7 @@ async def _talk_demo_command(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-vtuber",
-        description="Local AI VTuber Phase 0/1/2 tools",
+        description="Local AI VTuber Phase 0/1/2/3 tools",
     )
     parser.add_argument(
         "--config",
@@ -552,10 +778,49 @@ def build_parser() -> argparse.ArgumentParser:
         default=30.0,
         help="Seconds to wait for EventSub readiness and the echoed event",
     )
+    subparsers.add_parser(
+        "llm-serve",
+        help="Run the configured local llama.cpp server",
+    )
+    subparsers.add_parser(
+        "llm-status",
+        help="Validate the local LLM server and strict output contract",
+    )
+    llm_chat = subparsers.add_parser(
+        "llm-chat",
+        help="Generate and validate one local structured chat decision",
+    )
+    llm_chat.add_argument("message", help="One untrusted chat message to evaluate")
+    llm_benchmark = subparsers.add_parser(
+        "llm-benchmark",
+        help="Run 100+ Traditional Chinese cases and record latency/RAM/VRAM",
+    )
+    llm_benchmark.add_argument(
+        "--cases",
+        type=Path,
+        help="Evaluation case JSON; defaults to the configured Phase 3 dataset",
+    )
+    llm_benchmark.add_argument(
+        "--output",
+        type=Path,
+        help="Benchmark report path; defaults under .local/benchmarks",
+    )
+    llm_benchmark.add_argument(
+        "--server-pid",
+        type=int,
+        help="llama-server PID for process RAM measurement",
+    )
+    llm_benchmark.add_argument(
+        "--minimum-schema-rate",
+        type=float,
+        default=0.99,
+        help="Required safe schema acceptance rate (default: 0.99)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_console_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -603,13 +868,31 @@ def main(argv: list[str] | None = None) -> int:
                     message=args.message,
                 )
             )
-        return asyncio.run(
-            _twitch_smoke_command(
-                config,
-                message=args.message,
-                timeout=args.timeout,
+        if args.command == "twitch-smoke":
+            return asyncio.run(
+                _twitch_smoke_command(
+                    config,
+                    message=args.message,
+                    timeout=args.timeout,
+                )
             )
-        )
+        if args.command == "llm-serve":
+            return run_server(config)
+        if args.command == "llm-status":
+            return asyncio.run(_llm_status_command(config))
+        if args.command == "llm-chat":
+            return asyncio.run(_llm_chat_command(config, message=args.message))
+        if args.command == "llm-benchmark":
+            return asyncio.run(
+                _llm_benchmark_command(
+                    config,
+                    cases_path=args.cases,
+                    output_path=args.output,
+                    server_pid=args.server_pid,
+                    minimum_schema_rate=args.minimum_schema_rate,
+                )
+            )
+        raise AssertionError(f"Unhandled command: {args.command}")
     except (
         ActionMappingError,
         ConfigError,
@@ -620,6 +903,8 @@ def main(argv: list[str] | None = None) -> int:
         VTSConnectionError,
         VTSProtocolError,
         TwitchError,
+        LLMError,
+        LLMOutputRejected,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

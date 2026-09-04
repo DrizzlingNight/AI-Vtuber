@@ -1,8 +1,9 @@
 # AI VTuber Local
 
-目前已實作 `PROJECT_BRIEF.md` 的 Phase 0～2：Python 專案基礎、VTube Studio
-控制，以及 Twitch 官方 Device Code Grant、EventSub WebSocket 收訊和 Helix
-Send Chat Message。尚未加入 LLM、TTS、OBS 或大型模型。
+目前已實作 `PROJECT_BRIEF.md` 的 Phase 0～3：Python 專案基礎、VTube Studio
+控制、Twitch 官方 Device Code Grant、EventSub WebSocket 收訊和 Helix
+Send Chat Message，以及以 llama.cpp 執行的本地結構化 LLM。尚未加入 TTS 或 OBS，
+也尚未把 Twitch、LLM 與 VTube Studio 串成自動直播流程。
 
 ## 安裝
 
@@ -152,6 +153,96 @@ message ID 已由 EventSub 收到但被自身訊息過濾器排除：
 `is_sent: false` 時會將 `drop_reason.code` 與訊息當作失敗回報。一般斷線會依指數退避
 重新連線並重建訂閱；`session_reconnect` 則會先連上 Twitch 指定的新 URL、收到 Welcome
 後才關閉舊連線，且不重複訂閱。斷線期間 Twitch 不保證補送事件。
+
+## 本地 LLM
+
+Phase 3 使用官方 `google/gemma-4-12B-it-qat-q4_0-gguf`，固定 revision
+`29d097773436b69ff9feafd636ab4cf873786537`。文字 GGUF 為 QAT Q4_0、
+6,975,879,296 bytes（約 6.50 GiB），SHA-256：
+
+```text
+93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b
+```
+
+模型採 Apache-2.0，可用於商業 Twitch 內容；若重新散布模型，仍須保留授權與
+attribution。完整選型、runtime digest 與資源估算記錄在
+[`docs/phase-3-model.md`](docs/phase-3-model.md)。
+
+llama.cpp 固定使用官方 `b10621`（stable `v0.3.0` 對應 nightly binaries）的
+Windows CUDA 12.4 build。將 runtime 解壓到
+`.local/runtime/llama.cpp/`，模型放在
+`models/gemma-4-12b-it-qat-q4_0.gguf`。兩個目錄都由 `.gitignore` 排除。
+
+啟動本機 server；啟動前會完整核對模型 SHA-256，失敗就拒絕載入：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber llm-serve
+```
+
+另一個 PowerShell 視窗可檢查 server、模型與實際 allowlist，或測試一則聊天：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber llm-status
+.\.venv\Scripts\python.exe -m ai_vtuber llm-chat "晚上好～今天過得怎麼樣？"
+```
+
+LLM endpoint 被設定 schema 限制在 loopback HTTP，不接受遠端主機、URL credentials
+或 HTTPS API。`llm-serve` 會建立 `.local/secrets/llama-server-api-key.txt`，推論
+endpoint 沒有該 key 會回 401；CORS 只允許 localhost，且 Web UI 關閉。送入模型的
+資料只有版本控制內的角色 prompt 與單則測試聊天，不會建立或傳入 `TwitchAuth`、
+DPAPI token store、access token、refresh token、VTS internal ID 或任意 API
+payload。
+
+### 結構化輸出
+
+server 端使用 llama.cpp `response_format=json_schema` 強制封閉 JSON；程式端仍以
+Pydantic 和動態 allowlist 做第二次驗證。任何解析、欄位、長度或白名單錯誤都會安全
+拒絕，不會嘗試修補後執行。
+
+| decision | 必要規則 |
+|---|---|
+| `reply` | `speech`、`chat_reply`、`emotion` 必填；`action` 可為 `null`；記憶固定為 `null` |
+| `react_only` | 不得有文字；`emotion` 或 `action` 至少一項，且 intensity 大於 0 |
+| `ignore` | 文字、情緒、動作與記憶均為 `null`，intensity 固定為 0 |
+
+`emotion` 只能來自 `config/app.yaml`；`action` 不只受同一檔案限制，啟動時還必須
+確實存在於 `config/actions.local.yaml` 的既有 VTS 語意白名單。目前只開放較中性的
+`continuous_test`，不開放 NightRain 的生氣表情／熱鍵、嘴型與 talk-demo 底層通道。
+
+### 110 組繁中評測與 benchmark
+
+`tests/fixtures/traditional_chinese_chat_cases.json` 包含 110 組不重複案例：40 組自然
+聊天、20 組 Twitch 情境、20 組 decision、15 組角色互動及 15 組提示注入／越權案例。
+mock/unit tests 使用同一資料集，不需要 Twitch、VTube Studio、llama.cpp 或模型。
+
+實機 benchmark 必須保持 VTube Studio 開啟；工具會在整段測試持續探測 VTS，並每
+0.5 秒取樣系統 RAM、`llama-server` working set、整體 GPU VRAM 與 GPU utilization：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber llm-benchmark
+```
+
+報告會原子寫入 `.local/benchmarks/`，包含每案輸出、safe rejection、decision 命中、
+首 token、總時間、token/s、RAM、VRAM 與 VTS 全程在線狀態。預設至少 99% 輸出須通過
+schema 與白名單，否則命令回傳 exit code 2。
+
+目前 Gemma 4 12B 正式基線（VTube Studio 全程開啟）：
+
+| 指標 | 結果 |
+|---|---:|
+| 直接通過／安全拒絕 | 109／1，共 110 組 |
+| schema＋語言＋白名單接受率 | 99.09% |
+| decision 標註命中率 | 98.18% |
+| 首 token p50／p95 | 1.63／1.79 秒 |
+| 總生成 p50／p95 | 11.19／15.02 秒 |
+| token/s p50 | 6.11 |
+| 合併 VRAM 峰值 | 7,311 MiB |
+| VTS-only VRAM | 2,657 MiB |
+| LLM 路徑增加 VRAM | 約 4,654 MiB |
+| `llama-server` working set 峰值 | 8,787 MiB |
+
+唯一 safe rejection 是回覆混入簡體字，沒有送往 Twitch 或 VTS。完整可重現摘要與
+已知限制見 [`docs/phase-3-model.md`](docs/phase-3-model.md)。
 
 ## 測試
 

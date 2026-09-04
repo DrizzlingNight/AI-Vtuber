@@ -12,11 +12,13 @@ _SENSITIVE_KEY_PARTS = (
     "password",
     "secret",
     "credential",
+    "api_key",
 )
-_SENSITIVE_KEYS = ("device_code",)
+_SENSITIVE_KEYS = ("device_code", "api_key", "llama_server_api_key")
 _AUTH_PATTERN = re.compile(r"(?i)\b(?:Bearer|OAuth)\s+[A-Za-z0-9._~+/=-]+")
 _ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(authenticationToken|access_token|refresh_token|device_code|token|"
+    r"(?i)\b(authenticationToken|access_token|refresh_token|device_code|"
+    r"api[_-]?key|token|"
     r"authorization|password|secret)\b(\s*[:=]\s*)([^\s,;]+)"
 )
 

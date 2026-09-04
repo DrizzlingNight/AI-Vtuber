@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from ai_vtuber.app import main
 from ai_vtuber.config import (
     ConfigError,
     TwitchSettings,
@@ -46,6 +47,9 @@ def test_load_app_config_resolves_project_paths(tmp_path: Path) -> None:
     assert loaded.token_path == tmp_path / ".local/token.json"
     assert loaded.twitch_token_path == (
         tmp_path / ".local/secrets/twitch-token.bin"
+    )
+    assert loaded.llm_api_key_path == (
+        tmp_path / ".local/secrets/llama-server-api-key.txt"
     )
     assert loaded.actions_path == tmp_path / "config/actions.local.yaml"
 
@@ -146,3 +150,10 @@ def test_twitch_client_id_prefers_environment(
 def test_phase_two_rejects_extra_twitch_scopes() -> None:
     with pytest.raises(ValueError, match="must be exactly"):
         TwitchSettings(scopes=("user:read:chat", "user:write:chat", "bits:read"))
+
+
+def test_health_cli_entrypoint_runs_with_phase_three_config(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["health"]) == 0
+    assert '"status": "ready"' in capsys.readouterr().out

@@ -19,11 +19,52 @@ twitch:
   reconnect_initial_delay_seconds: 1.0
   reconnect_max_delay_seconds: 30.0
 
+llm:
+  base_url: http://127.0.0.1:8080/v1
+  runtime_release: b10621
+  runtime_commit: c1d0e7a004015f23bc0233470b747b596f29b264
+  runtime_backend: CUDA 12.4
+  model: gemma-4-12b-it-qat-q4_0
+  model_repository: google/gemma-4-12B-it-qat-q4_0-gguf
+  model_revision: 29d097773436b69ff9feafd636ab4cf873786537
+  model_sha256: 93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b
+  quantization: QAT Q4_0
+  license: Apache-2.0
+  request_timeout_seconds: 120.0
+  max_tokens: 192
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 64
+  seed: 42
+  context_size: 4096
+  gpu_layers: 28
+  threads: 12
+  batch_threads: 12
+  character_name: NightRain
+  persona: 像熟悉聊天室的台灣實況主，使用自然、簡短的繁體中文，不使用翻譯腔或客服口吻。
+  allowed_emotions:
+    - neutral
+    - happy
+    - amused
+    - surprised
+    - concerned
+    - angry
+  allowed_actions:
+    - continuous_test
+  action_descriptions:
+    continuous_test: 做一次輕微的上下點頭
+
 paths:
   token: .local/secrets/vts-token.json
   twitch_token: .local/secrets/twitch-token.bin
+  llm_api_key: .local/secrets/llama-server-api-key.txt
   inventory: .local/state/vts-inventory.json
   actions: config/actions.local.yaml
+  llama_server: .local/runtime/llama.cpp/llama-server.exe
+  llm_model: models/gemma-4-12b-it-qat-q4_0.gguf
+  llm_server_state: .local/state/llama-server.json
+  llm_benchmarks: .local/benchmarks
+  llm_evaluation_cases: tests/fixtures/traditional_chinese_chat_cases.json
 
 discovery:
   preferred_hotkey_types:
