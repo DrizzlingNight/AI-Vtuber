@@ -9,8 +9,19 @@ vts:
   reconnect_initial_delay_seconds: 0.5
   reconnect_max_delay_seconds: 5.0
 
+twitch:
+  client_id: fco8hxyg92yyaqxrzzfuxi6hbll51o
+  scopes:
+    - user:read:chat
+    - user:write:chat
+  send_interval_seconds: 5.0
+  eventsub_keepalive_timeout_seconds: 30
+  reconnect_initial_delay_seconds: 1.0
+  reconnect_max_delay_seconds: 30.0
+
 paths:
   token: .local/secrets/vts-token.json
+  twitch_token: .local/secrets/twitch-token.bin
   inventory: .local/state/vts-inventory.json
   actions: config/actions.local.yaml
 

@@ -13,16 +13,19 @@ _SENSITIVE_KEY_PARTS = (
     "secret",
     "credential",
 )
-_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_SENSITIVE_KEYS = ("device_code",)
+_AUTH_PATTERN = re.compile(r"(?i)\b(?:Bearer|OAuth)\s+[A-Za-z0-9._~+/=-]+")
 _ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(authenticationToken|access_token|refresh_token|token|"
+    r"(?i)\b(authenticationToken|access_token|refresh_token|device_code|token|"
     r"authorization|password|secret)\b(\s*[:=]\s*)([^\s,;]+)"
 )
 
 
 def _is_sensitive_key(key: object) -> bool:
     normalized = str(key).casefold()
-    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+    return normalized in _SENSITIVE_KEYS or any(
+        part in normalized for part in _SENSITIVE_KEY_PARTS
+    )
 
 
 def redact(value: object, key: object | None = None) -> object:
@@ -33,7 +36,7 @@ def redact(value: object, key: object | None = None) -> object:
     if isinstance(value, (list, tuple)):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        value = _BEARER_PATTERN.sub(f"Bearer {REDACTED}", value)
+        value = _AUTH_PATTERN.sub(REDACTED, value)
         return _ASSIGNMENT_PATTERN.sub(
             lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}",
             value,

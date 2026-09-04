@@ -7,6 +7,7 @@ import yaml
 
 from ai_vtuber.config import (
     ConfigError,
+    TwitchSettings,
     load_actions_config,
     load_app_config,
 )
@@ -43,6 +44,9 @@ def test_load_app_config_resolves_project_paths(tmp_path: Path) -> None:
 
     assert loaded.project_root == tmp_path
     assert loaded.token_path == tmp_path / ".local/token.json"
+    assert loaded.twitch_token_path == (
+        tmp_path / ".local/secrets/twitch-token.bin"
+    )
     assert loaded.actions_path == tmp_path / "config/actions.local.yaml"
 
 
@@ -101,4 +105,44 @@ def test_app_config_rejects_unknown_fields(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="unexpected"):
         load_app_config(path)
-        load_app_config(path)
+
+
+def test_twitch_client_id_prefers_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    path = config_dir / "app.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "vts": {
+                    "plugin_name": "Test Plugin",
+                    "plugin_developer": "Test Developer",
+                },
+                "twitch": {"client_id": "file-client-id"},
+                "paths": {
+                    "token": ".local/token.json",
+                    "inventory": ".local/inventory.json",
+                    "actions": "config/actions.local.yaml",
+                },
+                "discovery": {
+                    "preferred_hotkey_types": ["TriggerAnimation"],
+                    "preferred_continuous_parameters": ["FaceAngleY"],
+                    "preferred_mouth_parameters": ["MouthOpen"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "environment-client-id")
+
+    loaded = load_app_config(path)
+
+    assert loaded.require_twitch_client_id() == "environment-client-id"
+
+
+def test_phase_two_rejects_extra_twitch_scopes() -> None:
+    with pytest.raises(ValueError, match="must be exactly"):
+        TwitchSettings(scopes=("user:read:chat", "user:write:chat", "bits:read"))

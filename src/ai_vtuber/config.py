@@ -9,6 +9,8 @@ from uuid import uuid4
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+TWITCH_REQUIRED_SCOPES = ("user:read:chat", "user:write:chat")
+
 
 class ConfigError(ValueError):
     """Raised when a project configuration file is invalid."""
@@ -46,8 +48,81 @@ class VTSSettings(StrictModel):
         return self
 
 
+class TwitchSettings(StrictModel):
+    client_id: str | None = Field(default=None, min_length=1, max_length=128)
+    scopes: tuple[str, ...] = TWITCH_REQUIRED_SCOPES
+    device_authorization_url: str = "https://id.twitch.tv/oauth2/device"
+    token_url: str = "https://id.twitch.tv/oauth2/token"
+    validation_url: str = "https://id.twitch.tv/oauth2/validate"
+    helix_url: str = "https://api.twitch.tv/helix"
+    eventsub_url: str = "wss://eventsub.wss.twitch.tv/ws"
+    request_timeout_seconds: float = Field(default=10.0, gt=0)
+    authorization_timeout_seconds: float = Field(default=1_800.0, gt=0)
+    validation_interval_seconds: float = Field(default=3_600.0, gt=0, le=3_600)
+    refresh_margin_seconds: int = Field(default=300, ge=0, le=3_600)
+    send_interval_seconds: float = Field(default=5.0, ge=5.0, le=30.0)
+    eventsub_keepalive_timeout_seconds: int = Field(default=30, ge=10, le=600)
+    eventsub_keepalive_grace_seconds: float = Field(default=5.0, ge=0, le=30)
+    reconnect_attempts: int = Field(default=0, ge=0, le=100)
+    reconnect_initial_delay_seconds: float = Field(default=1.0, ge=0)
+    reconnect_max_delay_seconds: float = Field(default=30.0, ge=0)
+    message_dedup_capacity: int = Field(default=2_048, ge=100, le=100_000)
+    message_queue_size: int = Field(default=100, ge=1, le=10_000)
+
+    @field_validator("client_id")
+    @classmethod
+    def normalize_client_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or not normalized.isascii():
+            raise ValueError("Twitch client_id must be non-empty ASCII")
+        return normalized
+
+    @field_validator(
+        "device_authorization_url",
+        "token_url",
+        "validation_url",
+        "helix_url",
+    )
+    @classmethod
+    def validate_https_url(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("Twitch HTTP URLs must use https://")
+        return value.rstrip("/")
+
+    @field_validator("eventsub_url")
+    @classmethod
+    def validate_eventsub_url(cls, value: str) -> str:
+        if not value.startswith("wss://"):
+            raise ValueError("Twitch EventSub URL must use wss://")
+        return value
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if set(value) != set(TWITCH_REQUIRED_SCOPES) or len(value) != len(
+            TWITCH_REQUIRED_SCOPES
+        ):
+            raise ValueError(
+                "Phase 2 Twitch scopes must be exactly user:read:chat and "
+                "user:write:chat"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_reconnect_delays(self) -> TwitchSettings:
+        if self.reconnect_max_delay_seconds < self.reconnect_initial_delay_seconds:
+            raise ValueError(
+                "Twitch reconnect_max_delay_seconds must be greater than or equal "
+                "to reconnect_initial_delay_seconds"
+            )
+        return self
+
+
 class ProjectPaths(StrictModel):
     token: Path
+    twitch_token: Path = Path(".local/secrets/twitch-token.bin")
     inventory: Path
     actions: Path
 
@@ -64,6 +139,7 @@ class LoggingSettings(StrictModel):
 
 class AppConfig(StrictModel):
     vts: VTSSettings
+    twitch: TwitchSettings = Field(default_factory=TwitchSettings)
     paths: ProjectPaths
     discovery: DiscoverySettings
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -210,6 +286,27 @@ class LoadedAppConfig:
     @property
     def token_path(self) -> Path:
         return self.resolve(self.data.paths.token)
+
+    @property
+    def twitch_token_path(self) -> Path:
+        return self.resolve(self.data.paths.twitch_token)
+
+    @property
+    def twitch_client_id(self) -> str | None:
+        value = os.environ.get("TWITCH_CLIENT_ID") or self.data.twitch.client_id
+        normalized = value.strip() if value else ""
+        return normalized or None
+
+    def require_twitch_client_id(self) -> str:
+        client_id = self.twitch_client_id
+        if client_id is None:
+            raise ConfigError(
+                "Twitch Client ID is not configured; set TWITCH_CLIENT_ID or "
+                "twitch.client_id"
+            )
+        if not client_id.isascii():
+            raise ConfigError("Twitch Client ID must contain only ASCII characters")
+        return client_id
 
     @property
     def inventory_path(self) -> Path:

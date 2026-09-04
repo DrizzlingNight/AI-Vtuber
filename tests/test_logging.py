@@ -12,7 +12,11 @@ def test_json_logging_redacts_secret_fields_and_message_values() -> None:
         level=logging.INFO,
         pathname=__file__,
         lineno=1,
-        msg="authenticationToken=do-not-log Bearer abc.def.ghi",
+        msg=(
+            "authenticationToken=do-not-log "
+            "Bearer abc.def.ghi OAuth oauth-token "
+            "device_code=device-secret"
+        ),
         args=(),
         exc_info=None,
     )
@@ -25,6 +29,8 @@ def test_json_logging_redacts_secret_fields_and_message_values() -> None:
 
     assert "do-not-log" not in payload["message"]
     assert "abc.def.ghi" not in payload["message"]
+    assert "oauth-token" not in payload["message"]
+    assert "device-secret" not in payload["message"]
     assert payload["data"]["authentication_token"] == REDACTED
     assert payload["data"]["nested"]["refreshToken"] == REDACTED
     assert payload["data"]["nested"]["model"] == "safe"

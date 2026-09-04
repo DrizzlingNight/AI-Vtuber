@@ -9,6 +9,7 @@ description = "Local-first AI VTuber controller"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+  "httpx>=0.27,<1",
   "pydantic>=2.9,<3",
   "PyYAML>=6.0,<7",
   "websockets>=14,<17",
