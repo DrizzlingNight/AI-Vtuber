@@ -1,0 +1,28 @@
+vts:
+  url: ws://127.0.0.1:8001
+  plugin_name: AI VTuber Local
+  plugin_developer: Local Developer
+  connect_timeout_seconds: 3.0
+  request_timeout_seconds: 10.0
+  authorization_timeout_seconds: 120.0
+  reconnect_attempts: 12
+  reconnect_initial_delay_seconds: 0.5
+  reconnect_max_delay_seconds: 5.0
+
+paths:
+  token: .local/secrets/vts-token.json
+  inventory: .local/state/vts-inventory.json
+  actions: config/actions.local.yaml
+
+discovery:
+  preferred_hotkey_types:
+    - TriggerAnimation
+    - ToggleExpression
+  preferred_continuous_parameters:
+    - FaceAngleY
+    - FaceAngleX
+  preferred_mouth_parameters:
+    - MouthOpen
+
+logging:
+  level: INFO

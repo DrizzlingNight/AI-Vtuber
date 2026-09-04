@@ -1,0 +1,1 @@
+"""VTube Studio API integration."""

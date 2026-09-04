@@ -1,0 +1,107 @@
+version: 1
+model_id: replace-with-inventory-model-id
+model_name: replace-with-inventory-model-name
+actions:
+  expression_test:
+    kind: expression
+    target: replace-with-expression-file.exp3.json
+    hold_seconds: 0.8
+    fade_seconds: 0.2
+  hotkey_test:
+    kind: hotkey
+    target: replace-with-unique-hotkey-name
+    settle_seconds: 0.5
+  continuous_test:
+    kind: parameter
+    target: replace-with-vts-input-parameter
+    peak_value: 8.0
+    neutral_value: 0.0
+    duration_seconds: 0.8
+    fps: 30
+    weight: 1.0
+  mouth_test:
+    kind: parameter
+    target: replace-with-mouth-input-parameter
+    peak_value: 0.7
+    neutral_value: 0.0
+    duration_seconds: 0.7
+    fps: 30
+    weight: 1.0
+  talk_smile:
+    kind: expression
+    target: replace-with-smile-expression.exp3.json
+    hold_seconds: 20.0
+    fade_seconds: 0.4
+  talk_head_x:
+    kind: parameter
+    target: replace-with-head-x-input
+    peak_value: 11.0
+    neutral_value: 0.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+  talk_head_y:
+    kind: parameter
+    target: replace-with-head-y-input
+    peak_value: 6.0
+    neutral_value: 0.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+  talk_head_z:
+    kind: parameter
+    target: replace-with-head-z-input
+    peak_value: 5.0
+    neutral_value: 0.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+  talk_mouth_smile:
+    kind: parameter
+    target: replace-with-mouth-smile-input
+    peak_value: 0.45
+    neutral_value: 0.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+  talk_eye_left:
+    kind: parameter
+    target: replace-with-left-eye-open-input
+    peak_value: 0.0
+    neutral_value: 1.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+  talk_eye_right:
+    kind: parameter
+    target: replace-with-right-eye-open-input
+    peak_value: 0.0
+    neutral_value: 1.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+  talk_brows:
+    kind: parameter
+    target: replace-with-brows-input
+    peak_value: 0.35
+    neutral_value: 0.0
+    duration_seconds: 20.0
+    fps: 30
+    weight: 1.0
+smoke:
+  expression: expression_test
+  hotkey: hotkey_test
+  continuous: continuous_test
+  mouth: mouth_test
+talk_demo:
+  duration_seconds: 20.0
+  fps: 30
+  expression: talk_smile
+  head_x: talk_head_x
+  head_y: talk_head_y
+  head_z: talk_head_z
+  mouth_open: mouth_test
+  mouth_smile: talk_mouth_smile
+  eye_left: talk_eye_left
+  eye_right: talk_eye_right
+  brows: talk_brows
