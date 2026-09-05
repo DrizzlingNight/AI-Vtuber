@@ -52,6 +52,15 @@ def test_load_app_config_resolves_project_paths(tmp_path: Path) -> None:
         tmp_path / ".local/secrets/llama-server-api-key.txt"
     )
     assert loaded.actions_path == tmp_path / "config/actions.local.yaml"
+    assert loaded.espeak_ng_path == (
+        tmp_path / ".local/runtime/espeak-ng/eSpeak NG/espeak-ng.exe"
+    )
+    assert loaded.ffmpeg_path == (
+        tmp_path
+        / ".local/runtime/ffmpeg/"
+        "ffmpeg-master-latest-win64-lgpl/bin/ffmpeg.exe"
+    )
+    assert loaded.subtitle_path == tmp_path / ".local/state/subtitle.txt"
 
 
 def test_actions_config_rejects_smoke_reference_with_wrong_kind(
@@ -152,8 +161,10 @@ def test_phase_two_rejects_extra_twitch_scopes() -> None:
         TwitchSettings(scopes=("user:read:chat", "user:write:chat", "bits:read"))
 
 
-def test_health_cli_entrypoint_runs_with_phase_three_config(
+def test_health_cli_entrypoint_runs_with_phase_four_config(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert main(["health"]) == 0
-    assert '"status": "ready"' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert '"status": "ready"' in output
+    assert '"voice_type": "rule_based_synthetic_no_human_recording"' in output

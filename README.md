@@ -1,9 +1,10 @@
 # AI VTuber Local
 
-目前已實作 `PROJECT_BRIEF.md` 的 Phase 0～3：Python 專案基礎、VTube Studio
+目前已實作 `PROJECT_BRIEF.md` 的 Phase 0～4：Python 專案基礎、VTube Studio
 控制、Twitch 官方 Device Code Grant、EventSub WebSocket 收訊和 Helix
-Send Chat Message，以及以 llama.cpp 執行的本地結構化 LLM。尚未加入 TTS 或 OBS，
-也尚未把 Twitch、LLM 與 VTube Studio 串成自動直播流程。
+Send Chat Message、以 llama.cpp 執行的本地結構化 LLM，以及本機 TTS、音訊播放、
+字幕與 MouthOpen 同步。尚未加入 OBS，也尚未把 Twitch、LLM、VTube Studio 與 TTS
+串成自動直播流程。
 
 ## 安裝
 
@@ -243,6 +244,46 @@ schema 與白名單，否則命令回傳 exit code 2。
 
 唯一 safe rejection 是回覆混入簡體字，沒有送往 Twitch 或 VTS。完整可重現摘要與
 已知限制見 [`docs/phase-3-model.md`](docs/phase-3-model.md)。
+
+## 本地 TTS、播放、字幕與嘴型
+
+Phase 4 預設使用 eSpeak NG 1.52.0 的 `cmn` 國語規則式合成音。它不使用真人錄音、
+角色聲線或聲音克隆，採 CPU 推論且不增加 GPU VRAM。播放使用 sounddevice/PortAudio；
+PCM 樣本同時建立 30 Hz 音量包絡並映射到 NightRain 既有 `mouth_test`。單一播放工作者
+保證不重疊，正常結束、取消與錯誤都會停止聲音、清空字幕並將 MouthOpen 歸零。
+
+MeloTTS CPU adapter 已完成且禁止隱式下載，但官方中文 checkpoint 未揭露 speaker、
+訓練資料與聲音人格權來源，因此沒有下載或啟用。完整選型、大小、授權、聲音權利與實測
+記錄見 [`docs/phase-4-tts.md`](docs/phase-4-tts.md)。
+
+檢查本機 runtime 與播放裝置：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber tts-status
+```
+
+只產生 PCM/WAV，不需要 VTube Studio：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber tts-synthesize "晚安，小雨。"
+```
+
+播放語音、輸出字幕並同步 NightRain 嘴型：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber tts-speak "晚安，小雨。"
+```
+
+`--no-vts` 可單獨測試音訊與字幕；`--cancel-after 0.6` 可驗證中途停止與清理。正式資源
+量測需先啟動既有 `llm-serve` 並保持 VTube Studio 開啟：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber tts-benchmark
+```
+
+目前 10 句 CPU TTS 共存基線：首音／總生成 p50 皆為 0.065 秒、p95 皆為 0.076 秒，
+RTF p50 為 0.0084；Gemma 4 與 VTube Studio 同時運作時合併 VRAM 峰值 7,014 MiB，
+TTS 路徑增加 0 MiB VRAM，system RAM 峰值增量約 26 MiB。
 
 ## 測試
 

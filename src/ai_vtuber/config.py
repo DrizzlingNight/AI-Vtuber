@@ -134,6 +134,19 @@ class ProjectPaths(StrictModel):
     llm_evaluation_cases: Path = Path(
         "tests/fixtures/traditional_chinese_chat_cases.json"
     )
+    espeak_ng: Path = Path(".local/runtime/espeak-ng/eSpeak NG/espeak-ng.exe")
+    espeak_data: Path = Path(
+        ".local/runtime/espeak-ng/eSpeak NG/espeak-ng-data"
+    )
+    ffmpeg: Path = Path(
+        ".local/runtime/ffmpeg/"
+        "ffmpeg-master-latest-win64-lgpl/bin/ffmpeg.exe"
+    )
+    tts_audio: Path = Path(".local/audio/generated")
+    subtitle: Path = Path(".local/state/subtitle.txt")
+    tts_benchmarks: Path = Path(".local/benchmarks")
+    melo_config: Path = Path("models/melotts-zh/config.json")
+    melo_checkpoint: Path = Path("models/melotts-zh/checkpoint.pth")
 
 
 class DiscoverySettings(StrictModel):
@@ -245,10 +258,45 @@ class LLMSettings(StrictModel):
         return self
 
 
+class TTSSettings(StrictModel):
+    engine: Literal["espeak_ng"] = "espeak_ng"
+    voice: str = Field(default="cmn", min_length=1, max_length=64)
+    rate_wpm: int = Field(default=165, ge=80, le=450)
+    pitch: int = Field(default=48, ge=0, le=99)
+    amplitude: int = Field(default=100, ge=0, le=200)
+    request_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    envelope_frame_rate: int = Field(default=30, ge=15, le=60)
+    playback_queue_size: int = Field(default=16, ge=1, le=100)
+    espeak_release: str = "1.52.0"
+    espeak_license: str = "GPL-3.0"
+    espeak_executable_sha256: str = (
+        "3080ec3822c1b266ef557c710bc79a97d20a7ab133a34bac308b81ab0afc733e"
+    )
+    espeak_msi_sha256: str = (
+        "7f673c709ea5dd579d3b5ebb98688cc575328a6ab7438d2bc405b88cedaeafb9"
+    )
+    ffmpeg_build: str = "N-126404-g818e5d965b-20260904"
+    ffmpeg_license: str = "LGPL-3.0"
+    ffmpeg_archive_sha256: str = (
+        "5082d14b330e5159209ffd4669a0731474137533b72739d3f724414d55d8084f"
+    )
+    ffmpeg_executable_sha256: str = (
+        "16290441aee9e523c69300e29d285ceb136a45a6270dd523cf5933ab909b5d82"
+    )
+
+    @field_validator("voice")
+    @classmethod
+    def validate_voice(cls, value: str) -> str:
+        if not value.isascii() or any(character.isspace() for character in value):
+            raise ValueError("TTS voice must be an ASCII identifier without spaces")
+        return value
+
+
 class AppConfig(StrictModel):
     vts: VTSSettings
     twitch: TwitchSettings = Field(default_factory=TwitchSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    tts: TTSSettings = Field(default_factory=TTSSettings)
     paths: ProjectPaths
     discovery: DiscoverySettings
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -448,6 +496,38 @@ class LoadedAppConfig:
     @property
     def llm_evaluation_cases_path(self) -> Path:
         return self.resolve(self.data.paths.llm_evaluation_cases)
+
+    @property
+    def espeak_ng_path(self) -> Path:
+        return self.resolve(self.data.paths.espeak_ng)
+
+    @property
+    def espeak_data_path(self) -> Path:
+        return self.resolve(self.data.paths.espeak_data)
+
+    @property
+    def ffmpeg_path(self) -> Path:
+        return self.resolve(self.data.paths.ffmpeg)
+
+    @property
+    def tts_audio_path(self) -> Path:
+        return self.resolve(self.data.paths.tts_audio)
+
+    @property
+    def subtitle_path(self) -> Path:
+        return self.resolve(self.data.paths.subtitle)
+
+    @property
+    def tts_benchmarks_path(self) -> Path:
+        return self.resolve(self.data.paths.tts_benchmarks)
+
+    @property
+    def melo_config_path(self) -> Path:
+        return self.resolve(self.data.paths.melo_config)
+
+    @property
+    def melo_checkpoint_path(self) -> Path:
+        return self.resolve(self.data.paths.melo_checkpoint)
 
 
 def _read_yaml_mapping(path: Path) -> dict[str, object]:

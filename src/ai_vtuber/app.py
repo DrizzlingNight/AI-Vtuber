@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import Awaitable
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
@@ -48,6 +49,22 @@ from ai_vtuber.twitch.auth import (
 )
 from ai_vtuber.twitch.chat import TwitchHelixClient
 from ai_vtuber.twitch.eventsub import EventSubClient, TwitchChatMessage
+from ai_vtuber.tts.benchmark import (
+    build_tts_benchmark_report,
+    default_tts_benchmark_path,
+    run_tts_benchmark,
+    write_tts_benchmark_report,
+)
+from ai_vtuber.tts.engine import TTSError, SynthesizedSpeech
+from ai_vtuber.tts.espeak import EspeakNGEngine
+from ai_vtuber.tts.output import AudioPlaybackError, SoundDeviceOutput
+from ai_vtuber.tts.playback import NullMouthSink, SpeechPlaybackQueue
+from ai_vtuber.tts.runtime import (
+    inspect_ffmpeg,
+    validate_wav_with_ffmpeg,
+    verify_file_sha256,
+)
+from ai_vtuber.tts.subtitles import FileSubtitleSink
 from ai_vtuber.vts.actions import (
     ActionExecutor,
     ActionMappingError,
@@ -68,6 +85,7 @@ from ai_vtuber.vts.inventory import (
     VTSService,
     write_inventory,
 )
+from ai_vtuber.vts.lipsync import ConfiguredMouthSink
 from ai_vtuber.vts.talk_demo import TalkDemoExecutor
 
 DEFAULT_CONFIG = Path("config/app.yaml")
@@ -144,6 +162,18 @@ def health_report(config: LoadedAppConfig) -> dict[str, object]:
             "decisions": ["reply", "react_only", "ignore"],
             "allowed_emotions": list(config.data.llm.allowed_emotions),
             "allowed_actions": list(config.data.llm.allowed_actions),
+        },
+        "tts": {
+            "engine": config.data.tts.engine,
+            "voice": config.data.tts.voice,
+            "voice_type": "rule_based_synthetic_no_human_recording",
+            "device": "cpu",
+            "runtime_present": config.espeak_ng_path.is_file(),
+            "voice_data_present": config.espeak_data_path.is_dir(),
+            "ffmpeg_present": config.ffmpeg_path.is_file(),
+            "subtitle_path": str(config.subtitle_path),
+            "melo_runtime_enabled": False,
+            "melo_voice_rights_status": "unverified_not_downloaded",
         },
         "local_state": {
             "token_present": config.token_path.exists(),
@@ -344,6 +374,322 @@ def _build_llm_client(
         http_client,
         api_key=read_server_api_key(config.llm_api_key_path),
     )
+
+
+def _build_tts_engine(config: LoadedAppConfig) -> EspeakNGEngine:
+    settings = config.data.tts
+    return EspeakNGEngine(
+        config.espeak_ng_path,
+        config.espeak_data_path,
+        expected_executable_sha256=settings.espeak_executable_sha256,
+        voice=settings.voice,
+        rate_wpm=settings.rate_wpm,
+        pitch=settings.pitch,
+        amplitude=settings.amplitude,
+        timeout_seconds=settings.request_timeout_seconds,
+    )
+
+
+def _default_tts_audio_path(config: LoadedAppConfig) -> Path:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return config.tts_audio_path / f"speech-{timestamp}.wav"
+
+
+async def _write_synthesized_wav(
+    config: LoadedAppConfig,
+    speech: SynthesizedSpeech,
+    *,
+    output_path: Path | None,
+) -> Path:
+    resolved = (
+        _default_tts_audio_path(config)
+        if output_path is None
+        else config.resolve(output_path)
+    )
+    if resolved.suffix.casefold() != ".wav":
+        raise ConfigError("TTS output path must use the .wav extension")
+    await asyncio.to_thread(speech.audio.write_wav, resolved)
+    await asyncio.to_thread(validate_wav_with_ffmpeg, config.ffmpeg_path, resolved)
+    return resolved
+
+
+async def _tts_status_command(config: LoadedAppConfig) -> int:
+    settings = config.data.tts
+    espeak_sha256, ffmpeg = await asyncio.gather(
+        asyncio.to_thread(
+            verify_file_sha256,
+            config.espeak_ng_path,
+            settings.espeak_executable_sha256,
+            label="eSpeak NG executable",
+        ),
+        asyncio.to_thread(
+            inspect_ffmpeg,
+            config.ffmpeg_path,
+            expected_sha256=settings.ffmpeg_executable_sha256,
+        ),
+    )
+    if not config.espeak_data_path.is_dir():
+        raise TTSError(f"eSpeak NG voice data not found: {config.espeak_data_path}")
+    try:
+        import sounddevice
+    except ImportError as error:
+        raise AudioPlaybackError(
+            "sounddevice is not installed; install the project dependencies"
+        ) from error
+    try:
+        output_device = await asyncio.to_thread(
+            sounddevice.query_devices,
+            kind="output",
+        )
+    except sounddevice.PortAudioError as error:
+        raise AudioPlaybackError(
+            "Unable to query the default PortAudio output device"
+        ) from error
+    _print_json(
+        {
+            "status": "ready",
+            "engine": {
+                "name": settings.engine,
+                "voice": settings.voice,
+                "voice_type": "rule_based_synthetic_no_human_recording",
+                "release": settings.espeak_release,
+                "license": settings.espeak_license,
+                "commercial_use": True,
+                "redistribution": (
+                    "Keep GPL-3.0 notices and provide corresponding source "
+                    "when redistributing the runtime"
+                ),
+                "device": "cpu",
+                "path": str(config.espeak_ng_path),
+                "sha256": espeak_sha256,
+            },
+            "audio_output": {
+                "backend": "sounddevice_portaudio",
+                "name": str(output_device["name"]),
+                "max_output_channels": int(output_device["max_output_channels"]),
+                "default_sample_rate": float(output_device["default_samplerate"]),
+            },
+            "ffmpeg": {
+                "build": settings.ffmpeg_build,
+                "license": settings.ffmpeg_license,
+                "path": str(config.ffmpeg_path),
+                "version": ffmpeg.version,
+                "sha256": settings.ffmpeg_executable_sha256,
+            },
+            "subtitle": str(config.subtitle_path),
+            "melo_tts": {
+                "adapter": "available",
+                "runtime_installed": False,
+                "checkpoint_present": config.melo_checkpoint_path.is_file(),
+                "voice_rights": "unverified_not_approved",
+                "implicit_downloads": False,
+            },
+        }
+    )
+    return 0
+
+
+async def _tts_synthesize_command(
+    config: LoadedAppConfig,
+    *,
+    text: str,
+    output_path: Path | None,
+) -> int:
+    await asyncio.to_thread(
+        inspect_ffmpeg,
+        config.ffmpeg_path,
+        expected_sha256=config.data.tts.ffmpeg_executable_sha256,
+    )
+    speech = await _build_tts_engine(config).synthesize(text)
+    wav_path = await _write_synthesized_wav(
+        config,
+        speech,
+        output_path=output_path,
+    )
+    _print_json(
+        {
+            "status": "generated",
+            "text": speech.text,
+            "wav": str(wav_path),
+            "pcm": {
+                "sample_rate": speech.audio.sample_rate,
+                "channels": speech.audio.channels,
+                "sample_width_bytes": speech.audio.sample_width,
+                "frames": speech.audio.frame_count,
+                "duration_seconds": round(speech.audio.duration_seconds, 6),
+            },
+            "metrics": asdict(speech.metrics),
+        }
+    )
+    return 0
+
+
+async def _play_speech(
+    config: LoadedAppConfig,
+    speech: SynthesizedSpeech,
+    *,
+    mouth: ConfiguredMouthSink | NullMouthSink,
+    audio_device: str | None,
+    cancel_after_seconds: float | None,
+) -> dict[str, str]:
+    if cancel_after_seconds is not None and cancel_after_seconds <= 0:
+        raise ConfigError("--cancel-after must be greater than zero")
+    output = SoundDeviceOutput(device=audio_device)
+    subtitles = FileSubtitleSink(config.subtitle_path)
+    async with SpeechPlaybackQueue(
+        output,
+        mouth,
+        subtitles,
+        max_queue_size=config.data.tts.playback_queue_size,
+        envelope_frame_rate=config.data.tts.envelope_frame_rate,
+    ) as playback:
+        ticket = await playback.enqueue(speech)
+        cancellation: asyncio.Task[None] | None = None
+        if cancel_after_seconds is not None:
+            async def cancel_later() -> None:
+                await asyncio.sleep(cancel_after_seconds)
+                await playback.cancel_current()
+
+            cancellation = asyncio.create_task(cancel_later())
+        try:
+            result = await ticket.wait()
+        finally:
+            if cancellation is not None and not cancellation.done():
+                cancellation.cancel()
+                await asyncio.gather(cancellation, return_exceptions=True)
+    return asdict(result)
+
+
+async def _tts_speak_command(
+    config: LoadedAppConfig,
+    *,
+    text: str,
+    output_path: Path | None,
+    no_vts: bool,
+    audio_device: str | None,
+    cancel_after_seconds: float | None,
+) -> int:
+    await asyncio.to_thread(
+        inspect_ffmpeg,
+        config.ffmpeg_path,
+        expected_sha256=config.data.tts.ffmpeg_executable_sha256,
+    )
+    speech = await _build_tts_engine(config).synthesize(text)
+    wav_path = await _write_synthesized_wav(
+        config,
+        speech,
+        output_path=output_path,
+    )
+    model: dict[str, str] | None = None
+    if no_vts:
+        playback_result = await _play_speech(
+            config,
+            speech,
+            mouth=NullMouthSink(),
+            audio_device=audio_device,
+            cancel_after_seconds=cancel_after_seconds,
+        )
+    else:
+        async with _build_client(config) as client:
+            service = VTSService(client)
+            inventory = await service.refresh_inventory()
+            write_inventory(config.inventory_path, inventory)
+            actions = load_actions_config(config.actions_path)
+            mouth_action = actions.smoke.mouth
+            if mouth_action is None:
+                raise ConfigError(
+                    "No mouth action is configured in smoke.mouth"
+                )
+            playback_result = await _play_speech(
+                config,
+                speech,
+                mouth=ConfiguredMouthSink(
+                    service,
+                    actions,
+                    semantic_name=mouth_action,
+                ),
+                audio_device=audio_device,
+                cancel_after_seconds=cancel_after_seconds,
+            )
+            model = {
+                "name": inventory.model.name,
+                "id": inventory.model.model_id,
+            }
+    _print_json(
+        {
+            "status": playback_result["status"],
+            "wav": str(wav_path),
+            "subtitle": str(config.subtitle_path),
+            "mouth_sync": not no_vts,
+            "model": model,
+            "metrics": asdict(speech.metrics),
+            "audio_duration_seconds": round(speech.audio.duration_seconds, 6),
+        }
+    )
+    return 0
+
+
+async def _tts_benchmark_command(
+    config: LoadedAppConfig,
+    *,
+    output_path: Path | None,
+) -> int:
+    await asyncio.to_thread(
+        inspect_ffmpeg,
+        config.ffmpeg_path,
+        expected_sha256=config.data.tts.ffmpeg_executable_sha256,
+    )
+    vts_before = _vts_online(config.data.vts.url)
+    if not vts_before:
+        raise ConfigError("VTube Studio must remain open during the TTS benchmark")
+    state = read_server_state(config.llm_server_state_path)
+    if state is None:
+        raise ConfigError(
+            "llama-server must be running during the coexistence benchmark"
+        )
+
+    async with httpx.AsyncClient() as http_client:
+        llm = _build_llm_client(config, http_client)
+        await llm.health()
+        llm_before = True
+        async with ResourceSampler(
+            server_pid=os.getpid(),
+            interval_seconds=0.02,
+            vts_probe=lambda: _vts_online(config.data.vts.url),
+        ) as resources:
+            results = await run_tts_benchmark(_build_tts_engine(config))
+        await llm.health()
+        llm_after = True
+
+    vts_after = _vts_online(config.data.vts.url)
+    summary = resources.summary()
+    if not vts_after or summary.vts_online_throughout is not True:
+        raise ConfigError("VTube Studio was not online throughout the TTS benchmark")
+    resolved_output = (
+        default_tts_benchmark_path(config.tts_benchmarks_path)
+        if output_path is None
+        else config.resolve(output_path)
+    )
+    payload = build_tts_benchmark_report(
+        results,
+        settings=config.data.tts,
+        resources=summary,
+        vts_online_before=vts_before,
+        vts_online_after=vts_after,
+        llm_online_before=llm_before,
+        llm_online_after=llm_after,
+    )
+    write_tts_benchmark_report(resolved_output, payload)
+    _print_json(
+        {
+            "status": "passed",
+            "report": str(resolved_output),
+            "summary": payload["summary"],
+            "resources": payload["resources"],
+            "coexistence": payload["coexistence"],
+        }
+    )
+    return 0
 
 
 async def _llm_status_command(config: LoadedAppConfig) -> int:
@@ -703,7 +1049,7 @@ async def _talk_demo_command(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-vtuber",
-        description="Local AI VTuber Phase 0/1/2/3 tools",
+        description="Local AI VTuber Phase 0/1/2/3/4 tools",
     )
     parser.add_argument(
         "--config",
@@ -816,6 +1162,53 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.99,
         help="Required safe schema acceptance rate (default: 0.99)",
     )
+    subparsers.add_parser(
+        "tts-status",
+        help="Verify local TTS, FFmpeg, audio output, and voice rights status",
+    )
+    tts_synthesize = subparsers.add_parser(
+        "tts-synthesize",
+        help="Generate one local PCM/WAV file without playback or VTS",
+    )
+    tts_synthesize.add_argument("text", help="Text to synthesize locally")
+    tts_synthesize.add_argument(
+        "--output",
+        type=Path,
+        help="WAV output path; defaults under .local/audio/generated",
+    )
+    tts_speak = subparsers.add_parser(
+        "tts-speak",
+        help="Generate and play one utterance with subtitles and MouthOpen",
+    )
+    tts_speak.add_argument("text", help="Text to synthesize and play locally")
+    tts_speak.add_argument(
+        "--output",
+        type=Path,
+        help="WAV output path; defaults under .local/audio/generated",
+    )
+    tts_speak.add_argument(
+        "--no-vts",
+        action="store_true",
+        help="Play audio and subtitles without connecting to VTube Studio",
+    )
+    tts_speak.add_argument(
+        "--audio-device",
+        help="Optional PortAudio output device name or identifier",
+    )
+    tts_speak.add_argument(
+        "--cancel-after",
+        type=float,
+        help="Cancel playback after this many seconds for cleanup testing",
+    )
+    tts_benchmark = subparsers.add_parser(
+        "tts-benchmark",
+        help="Measure local TTS latency, RTF, RAM, and coexistence VRAM",
+    )
+    tts_benchmark.add_argument(
+        "--output",
+        type=Path,
+        help="Benchmark report path; defaults under .local/benchmarks",
+    )
     return parser
 
 
@@ -892,6 +1285,34 @@ def main(argv: list[str] | None = None) -> int:
                     minimum_schema_rate=args.minimum_schema_rate,
                 )
             )
+        if args.command == "tts-status":
+            return asyncio.run(_tts_status_command(config))
+        if args.command == "tts-synthesize":
+            return asyncio.run(
+                _tts_synthesize_command(
+                    config,
+                    text=args.text,
+                    output_path=args.output,
+                )
+            )
+        if args.command == "tts-speak":
+            return asyncio.run(
+                _tts_speak_command(
+                    config,
+                    text=args.text,
+                    output_path=args.output,
+                    no_vts=args.no_vts,
+                    audio_device=args.audio_device,
+                    cancel_after_seconds=args.cancel_after,
+                )
+            )
+        if args.command == "tts-benchmark":
+            return asyncio.run(
+                _tts_benchmark_command(
+                    config,
+                    output_path=args.output,
+                )
+            )
         raise AssertionError(f"Unhandled command: {args.command}")
     except (
         ActionMappingError,
@@ -903,6 +1324,7 @@ def main(argv: list[str] | None = None) -> int:
         VTSConnectionError,
         VTSProtocolError,
         TwitchError,
+        TTSError,
         LLMError,
         LLMOutputRejected,
     ) as error:

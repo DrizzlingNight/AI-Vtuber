@@ -54,6 +54,24 @@ llm:
   action_descriptions:
     continuous_test: 做一次輕微的上下點頭
 
+tts:
+  engine: espeak_ng
+  voice: cmn
+  rate_wpm: 165
+  pitch: 48
+  amplitude: 100
+  request_timeout_seconds: 30.0
+  envelope_frame_rate: 30
+  playback_queue_size: 16
+  espeak_release: 1.52.0
+  espeak_license: GPL-3.0
+  espeak_executable_sha256: 3080ec3822c1b266ef557c710bc79a97d20a7ab133a34bac308b81ab0afc733e
+  espeak_msi_sha256: 7f673c709ea5dd579d3b5ebb98688cc575328a6ab7438d2bc405b88cedaeafb9
+  ffmpeg_build: N-126404-g818e5d965b-20260904
+  ffmpeg_license: LGPL-3.0
+  ffmpeg_archive_sha256: 5082d14b330e5159209ffd4669a0731474137533b72739d3f724414d55d8084f
+  ffmpeg_executable_sha256: 16290441aee9e523c69300e29d285ceb136a45a6270dd523cf5933ab909b5d82
+
 paths:
   token: .local/secrets/vts-token.json
   twitch_token: .local/secrets/twitch-token.bin
@@ -65,6 +83,14 @@ paths:
   llm_server_state: .local/state/llama-server.json
   llm_benchmarks: .local/benchmarks
   llm_evaluation_cases: tests/fixtures/traditional_chinese_chat_cases.json
+  espeak_ng: .local/runtime/espeak-ng/eSpeak NG/espeak-ng.exe
+  espeak_data: .local/runtime/espeak-ng/eSpeak NG/espeak-ng-data
+  ffmpeg: .local/runtime/ffmpeg/ffmpeg-master-latest-win64-lgpl/bin/ffmpeg.exe
+  tts_audio: .local/audio/generated
+  subtitle: .local/state/subtitle.txt
+  tts_benchmarks: .local/benchmarks
+  melo_config: models/melotts-zh/config.json
+  melo_checkpoint: models/melotts-zh/checkpoint.pth
 
 discovery:
   preferred_hotkey_types:
