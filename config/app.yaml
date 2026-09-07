@@ -72,6 +72,19 @@ tts:
   ffmpeg_archive_sha256: 5082d14b330e5159209ffd4669a0731474137533b72739d3f724414d55d8084f
   ffmpeg_executable_sha256: 16290441aee9e523c69300e29d285ceb136a45a6270dd523cf5933ab909b5d82
 
+orchestration:
+  message_queue_size: 32
+  message_ttl_seconds: 30.0
+  per_user_cooldown_seconds: 2.0
+  response_cooldown_seconds: 5.0
+  action_lead_seconds: 0.15
+  cleanup_timeout_seconds: 5.0
+  vts_operation_timeout_seconds: 3.0
+  high_priority_message_types:
+    - channel_points_highlighted
+    - power_ups_gigantified_emote
+  emotion_actions: {}
+
 paths:
   token: .local/secrets/vts-token.json
   twitch_token: .local/secrets/twitch-token.bin

@@ -20,6 +20,8 @@ class ConfiguredMouthSink:
         self._resource: InputParameterResource | None = None
 
     async def prepare(self) -> None:
+        self._binding = None
+        self._resource = None
         binding = self.config.actions.get(self.semantic_name)
         if not isinstance(binding, ParameterAction):
             raise ActionMappingError(
@@ -52,6 +54,7 @@ class ConfiguredMouthSink:
         if not 0 <= level <= 1:
             raise ValueError("Mouth level must be between zero and one")
         binding, resource = self._prepared()
+        await self._check_model()
         value = binding.neutral_value + (
             binding.peak_value - binding.neutral_value
         ) * level
@@ -64,11 +67,19 @@ class ConfiguredMouthSink:
     async def reset(self) -> None:
         if self._binding is None or self._resource is None:
             return
+        await self._check_model()
         await self.service.inject_parameter(
             self._resource.name,
             self._binding.neutral_value,
             weight=1.0,
         )
+
+    async def _check_model(self) -> None:
+        inventory = await self.service.ensure_inventory_current()
+        if inventory.model.model_id != self.config.model_id:
+            raise ActionMappingError(
+                "The current model no longer matches the prepared mouth mapping"
+            )
 
     def _prepared(self) -> tuple[ParameterAction, InputParameterResource]:
         if self._binding is None or self._resource is None:

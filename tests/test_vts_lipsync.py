@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -98,5 +99,25 @@ async def test_configured_mouth_rejects_wrong_model_before_injection(
 
     with pytest.raises(ActionMappingError, match="current model"):
         await mouth.prepare()
+
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_next_prepare_never_resets_a_different_model(
+    inventory: VTSInventory,
+) -> None:
+    service = FakeService(inventory)
+    mouth = ConfiguredMouthSink(
+        service, mouth_config(), semantic_name="mouth_test"  # type: ignore[arg-type]
+    )
+    await mouth.prepare()
+    service.inventory = replace(
+        inventory, model=replace(inventory.model, model_id="other-model")
+    )
+
+    with pytest.raises(ActionMappingError, match="current model"):
+        await mouth.prepare()
+    await mouth.reset()
 
     assert service.calls == []

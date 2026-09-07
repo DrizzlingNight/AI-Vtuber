@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 
@@ -202,3 +203,34 @@ def test_llm_endpoint_must_be_local_loopback() -> None:
             allowed_actions=("wave",),
             action_descriptions={"wave": "揮手"},
         )
+
+
+@pytest.mark.asyncio
+async def test_cancelling_generation_closes_the_active_sse_stream() -> None:
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"{"}}]}\n\n'
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, stream=Stream())
+        )
+    ) as http:
+        client = LlamaServerClient(settings(), http)
+        request = asyncio.create_task(
+            client.generate("晚安", system_prompt="固定提示", contract=contract())
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+    assert closed.is_set()

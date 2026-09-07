@@ -3,18 +3,20 @@ from __future__ import annotations
 import asyncio
 import struct
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from ai_vtuber.tts.audio import PCMBuffer
+from ai_vtuber.tts.audio import PCMBuffer, build_volume_envelope
 from ai_vtuber.tts.engine import (
     SynthesizedSpeech,
     SynthesisMetrics,
 )
 from ai_vtuber.tts.playback import SpeechPlaybackQueue
 from ai_vtuber.tts.subtitles import FileSubtitleSink
+from ai_vtuber.vts.actions import ActionMappingError
 
 
 def speech(text: str, *, amplitude: int = 12_000) -> SynthesizedSpeech:
@@ -51,6 +53,9 @@ class FakePlayback:
     @property
     def done(self) -> bool:
         return self._done
+
+    async def wait_started(self) -> float | None:
+        return time.perf_counter()
 
     async def wait(self) -> None:
         await self.release.wait()
@@ -138,6 +143,7 @@ async def test_playback_queue_never_overlaps_consecutive_speech() -> None:
 
     assert subtitles.visible == "第一句"
     assert len(output.playbacks) == 1
+    assert await first.wait_started() is not None
     output.playbacks[0].release.set()
     await wait_for_playbacks(output, 2)
 
@@ -191,6 +197,7 @@ async def test_clear_cancels_current_and_all_pending_speech() -> None:
 
     assert await queue.clear() == 3
     results = await asyncio.gather(*(ticket.wait() for ticket in tickets))
+    starts = await asyncio.gather(*(ticket.wait_started() for ticket in tickets))
     await queue.close()
 
     assert [result.status for result in results] == [
@@ -199,6 +206,8 @@ async def test_clear_cancels_current_and_all_pending_speech() -> None:
         "cancelled",
     ]
     assert len(output.playbacks) == 1
+    assert starts[0] is not None
+    assert starts[1:] == [None, None]
     assert output.playbacks[0]._stopped is True
     assert mouth.reset_count == 1
     assert subtitles.visible == ""
@@ -236,3 +245,119 @@ async def test_cancel_during_subtitle_write_waits_then_clears_file(
     assert output.playbacks == []
     assert mouth.reset_count == 1
     assert subtitles.path.read_bytes() == b""
+
+
+@pytest.mark.asyncio
+async def test_playback_start_failure_settles_both_ticket_futures() -> None:
+    class FailingOutput:
+        async def start(self, _: PCMBuffer) -> FakePlayback:
+            raise RuntimeError("device unavailable")
+
+    queue = SpeechPlaybackQueue(
+        FailingOutput(),  # type: ignore[arg-type]
+        FakeMouth(),
+        FakeSubtitles(),
+    )
+    ticket = await queue.enqueue(speech("無法播放"))
+
+    assert await asyncio.wait_for(ticket.wait_started(), timeout=1) is None
+    with pytest.raises(RuntimeError, match="device unavailable"):
+        await asyncio.wait_for(ticket.wait(), timeout=1)
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_clear_surfaces_cleanup_failure() -> None:
+    class FailingReset(FakeMouth):
+        async def reset(self) -> None:
+            raise ActionMappingError("reset failed")
+
+    output = FakeOutput()
+    subtitles = FakeSubtitles()
+    queue = SpeechPlaybackQueue(output, FailingReset(), subtitles)
+    ticket = await queue.enqueue(speech("清理錯誤"))
+    await wait_for_playbacks(output, 1)
+    try:
+        with pytest.raises(ActionMappingError, match="reset failed"):
+            await queue.clear()
+    finally:
+        await asyncio.gather(ticket.wait(), return_exceptions=True)
+        await queue.close()
+    assert subtitles.visible == ""
+
+
+@pytest.mark.asyncio
+async def test_repeated_clear_does_not_abort_mouth_reset() -> None:
+    reset_started = asyncio.Event()
+    allow_reset = asyncio.Event()
+
+    class SlowReset(FakeMouth):
+        async def reset(self) -> None:
+            reset_started.set()
+            await allow_reset.wait()
+            self.reset_count += 1
+
+    output = FakeOutput()
+    mouth = SlowReset()
+    subtitles = FakeSubtitles()
+    queue = SpeechPlaybackQueue(output, mouth, subtitles)
+    ticket = await queue.enqueue(speech("重複取消"))
+    await wait_for_playbacks(output, 1)
+    first = asyncio.create_task(queue.clear())
+    await asyncio.wait_for(reset_started.wait(), timeout=1)
+    second = asyncio.create_task(queue.clear())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    allow_reset.set()
+    await asyncio.gather(first, second)
+    await ticket.wait()
+    await queue.close()
+
+    assert mouth.reset_count == 1
+    assert subtitles.visible == ""
+    assert output.active == 0
+
+
+@pytest.mark.asyncio
+async def test_playback_completion_excludes_presentation_cleanup_time() -> None:
+    now = [2.0]
+
+    class TimedReset(FakeMouth):
+        async def reset(self) -> None:
+            now[0] = 20.0
+            self.reset_count += 1
+
+    output = FakeOutput()
+    queue = SpeechPlaybackQueue(
+        output, TimedReset(), FakeSubtitles(), clock=lambda: now[0]
+    )
+    ticket = await queue.enqueue(speech("時間軸測試"))
+    await wait_for_playbacks(output, 1)
+    output.playbacks[0].release.set()
+    result = await ticket.wait()
+    await queue.close()
+
+    assert result.completed_at == 2.0
+
+
+@pytest.mark.asyncio
+async def test_envelope_processing_does_not_block_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_thread = threading.get_ident()
+    envelope_threads: list[int] = []
+
+    def envelope(audio: PCMBuffer, *, frame_rate: int) -> object:
+        envelope_threads.append(threading.get_ident())
+        return build_volume_envelope(audio, frame_rate=frame_rate)
+
+    monkeypatch.setattr("ai_vtuber.tts.playback.build_volume_envelope", envelope)
+    output = FakeOutput()
+    queue = SpeechPlaybackQueue(output, FakeMouth(), FakeSubtitles())
+    ticket = await queue.enqueue(speech("音量分析"))
+    await wait_for_playbacks(output, 1)
+    output.playbacks[0].release.set()
+    await ticket.wait()
+    await queue.close()
+
+    assert envelope_threads and envelope_threads[0] != loop_thread

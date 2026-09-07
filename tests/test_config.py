@@ -5,9 +5,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ai_vtuber.app import main
+from ai_vtuber.app import _phase5_missing_prerequisites, main
 from ai_vtuber.config import (
     ConfigError,
+    LoadedAppConfig,
+    OrchestrationSettings,
     TwitchSettings,
     load_actions_config,
     load_app_config,
@@ -163,8 +165,47 @@ def test_phase_two_rejects_extra_twitch_scopes() -> None:
 
 def test_health_cli_entrypoint_runs_with_phase_four_config(
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("ai_vtuber.app._vts_online", lambda _: False)
     assert main(["health"]) == 0
     output = capsys.readouterr().out
     assert '"status": "ready"' in output
     assert '"voice_type": "rule_based_synthetic_no_human_recording"' in output
+    assert '"message_ttl_seconds": 30.0' in output
+
+
+def test_orchestration_config_rejects_invalid_priority_and_emotion_mapping() -> None:
+    with pytest.raises(ValueError, match="duplicates"):
+        OrchestrationSettings(high_priority_message_types=("text", "text"))
+
+    with pytest.raises(ValueError, match="unknown LLM emotions"):
+        config = load_app_config(Path("config/app.yaml"))
+        config.data.orchestration.emotion_actions["invented"] = "continuous_test"
+        config.data.validate_orchestration_emotions()
+
+
+def test_phase5_smoke_cli_rejects_zero_messages_before_using_services(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["phase5-smoke", "--messages", "0"]) == 1
+    assert "至少需要一則訊息" in capsys.readouterr().err
+
+
+def test_phase5_preflight_reports_missing_local_state_without_reading_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ai_vtuber.app._vts_online", lambda _: False)
+    loaded = load_app_config(Path("config/app.yaml"))
+    config = LoadedAppConfig(
+        data=loaded.data,
+        project_root=tmp_path,
+        source=loaded.source,
+    )
+
+    missing = _phase5_missing_prerequisites(config)
+
+    assert any("Twitch DPAPI 授權檔" in item for item in missing)
+    assert any("llama-server API key" in item for item in missing)
+    assert any("NightRain 語意動作映射" in item for item in missing)

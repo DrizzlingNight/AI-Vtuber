@@ -1,10 +1,15 @@
 # AI VTuber Local
 
-目前已實作 `PROJECT_BRIEF.md` 的 Phase 0～4：Python 專案基礎、VTube Studio
+Phase 0～4 已完成；Phase 5 整合程式已建立，但**尚未通過實機完整驗收**。
+既有功能包含 Python 專案基礎、VTube Studio
 控制、Twitch 官方 Device Code Grant、EventSub WebSocket 收訊和 Helix
 Send Chat Message、以 llama.cpp 執行的本地結構化 LLM，以及本機 TTS、音訊播放、
-字幕與 MouthOpen 同步。尚未加入 OBS，也尚未把 Twitch、LLM、VTube Studio 與 TTS
-串成自動直播流程。
+字幕與 MouthOpen 同步，並已串成有界、可打斷且故障隔離的自動回應流程。尚未加入
+OBS、長期記憶、額外內容過濾或高品質語音模型。
+
+本輪實際工作目錄、修改清單、回歸測例、命令結果與未完成事項，均以繁體中文記錄於
+[`docs/phase-5-work-log.md`](docs/phase-5-work-log.md)。隔離 worktree 的修改不會自動
+出現在 `F:\user\Documents\Workspace\AI Vtuber` 主 checkout。
 
 ## 安裝
 
@@ -284,6 +289,74 @@ MeloTTS CPU adapter 已完成且禁止隱式下載，但官方中文 checkpoint 
 目前 10 句 CPU TTS 共存基線：首音／總生成 p50 皆為 0.065 秒、p95 皆為 0.076 秒，
 RTF p50 為 0.0084；Gemma 4 與 VTube Studio 同時運作時合併 VRAM 峰值 7,014 MiB，
 TTS 路徑增加 0 MiB VRAM，system RAM 峰值增量約 26 MiB。
+
+## Phase 5 整合執行
+
+整合流程直接沿用 Phase 1～4 的 client、schema、action mapping、PCM/WAV 與單一播放
+佇列：
+
+```text
+EventSub -> bounded priority queue -> LLM -> validation -> TTS synthesis
+         -> VTS preparation -> subtitle/MouthOpen playback -> cleanup -> Helix reply
+```
+
+角色狀態依序為 `idle`、`thinking`、`validating`、`acting`、`speaking`、
+`cooldown`。只有再次通過既有 Pydantic schema、繁中檢查與 emotion/action 白名單的
+`speech` 才能進入 TTS。實際先完成語音合成，再等待 VTS 動作準備完成、保留短暫
+前導時間，最後播放語音；表情可維持到播放結束並還原。EventSub 使用同步 `put_nowait`
+寫入獨立有界佇列，不等待 LLM、
+VTS、TTS 或 Twitch 發送。
+
+佇列上限、TTL、同一使用者 cooldown、回應 cooldown 與可插隊的
+`channel.chat.message` 類型位於 `config/app.yaml` 的 `orchestration`。高優先訊息會
+取消尚未提交 Twitch 回覆的舊工作；目前播放會經既有播放佇列停止，字幕清空且嘴型復位。
+已開始送出的 Helix request 不會因打斷而重送，避免不確定網路結果造成重複訊息。
+
+持續執行整合流程：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber run --test-channel "已授權的測試頻道登入名稱"
+```
+
+`run --max-messages N` 可在處理指定數量後結束。`--test-channel` 必須與目前 Twitch
+授權身份相同，不符合就拒絕收發。**Twitch 關台後的聊天室仍可能公開可見**；指定測試
+頻道不會把它變成私人頻道。命令不會啟動 OBS 或開啟直播。
+
+### Phase 5 實機 smoke
+
+先啟動既有 `llm-serve`，保持 VTube Studio 與 NightRain 開啟，再從另一個 Twitch
+帳號送出一則能觸發 `reply` 的測試訊息：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
+  --test-channel "已授權的測試頻道登入名稱" --messages 1
+```
+
+連續測試可增加訊息數量；命令有整體 timeout，不會無限等待：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
+  --test-channel "已授權的測試頻道登入名稱" --messages 5 --timeout 900
+```
+
+報告會分別原子寫入 `.local/benchmarks/phase5-smoke-*.json` 及同名的**繁體中文 `.md`**
+文件，包含訊息收到至首 token、完整
+決策、首個 PCM block 寫入及播放完成的延遲，以及 system RAM、llama-server RSS、
+整體 GPU VRAM、GPU utilization 與 VTS 在線狀態。報告不保存聊天室文字、LLM 原始輸出、
+OAuth token、DPAPI store 內容或 llama-server API key。
+前置條件缺失、等待逾時、發送失敗或使用者取消也會留下明確的報告；缺少必要延遲、
+RAM 或 VRAM 時不得判為通過。`phase5_hour_acceptance` 另行標示至少一小時驗收，
+不能以單輪或幾分鐘的短測試替代。
+
+目前只對 `channel.chat.message` 內可辨識的訊息類型做優先權排序；訂閱、Raid 與 Channel
+Points 等額外 EventSub 訂閱仍屬 Phase 7。`emotion_actions` 預設為空，因為目前沒有經
+確認可安全對應每個情緒的 NightRain 表情；若要設定，值必須是
+`config/actions.local.yaml` 已存在、且同時受到 `llm.allowed_actions` 核准的語意動作。
+LLM 明確選出的白名單 action 優先於情緒對應動作；沒有核准映射的情緒會明確記錄為
+未完成反應，不會假裝模型已做出表情。
+
+完整設計、降級行為與驗收方式見
+[`docs/phase-5-orchestration.md`](docs/phase-5-orchestration.md)。
 
 ## 測試
 

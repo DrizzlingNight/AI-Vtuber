@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import socket
 import sys
 import time
 from collections.abc import Awaitable
+from contextlib import AsyncExitStack
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +42,26 @@ from ai_vtuber.llm.runtime import (
     verify_model_sha256,
 )
 from ai_vtuber.llm.schema import LLMOutputContract, LLMOutputRejected
+from ai_vtuber.orchestration.adapters import (
+    FaultTolerantMouthSink,
+    SerializedSpeechRuntime,
+    TwitchReplySink,
+    VTSReactionRuntime,
+)
+from ai_vtuber.orchestration.controller import (
+    AIVTuberOrchestrator,
+    ReactionError,
+    SpeechPipelineError,
+    TurnResult,
+)
+from ai_vtuber.orchestration.queue import BoundedPriorityChatQueue
+from ai_vtuber.orchestration.report import (
+    build_blocked_report,
+    build_phase5_report,
+    default_phase5_report_path,
+    write_phase5_report,
+)
+from ai_vtuber.tasks import finish_task
 from ai_vtuber.twitch.auth import (
     DeviceAuthorization,
     TwitchAuth,
@@ -174,6 +196,23 @@ def health_report(config: LoadedAppConfig) -> dict[str, object]:
             "subtitle_path": str(config.subtitle_path),
             "melo_runtime_enabled": False,
             "melo_voice_rights_status": "unverified_not_downloaded",
+        },
+        "orchestration": {
+            "message_queue_size": (
+                config.data.orchestration.message_queue_size
+            ),
+            "message_ttl_seconds": (
+                config.data.orchestration.message_ttl_seconds
+            ),
+            "per_user_cooldown_seconds": (
+                config.data.orchestration.per_user_cooldown_seconds
+            ),
+            "response_cooldown_seconds": (
+                config.data.orchestration.response_cooldown_seconds
+            ),
+            "high_priority_message_types": list(
+                config.data.orchestration.high_priority_message_types
+            ),
         },
         "local_state": {
             "token_present": config.token_path.exists(),
@@ -1046,10 +1085,389 @@ async def _talk_demo_command(
         return 0
 
 
+async def _wait_for_phase5_completion(
+    orchestrator: AIVTuberOrchestrator,
+    eventsub_runner: asyncio.Task[None],
+    *,
+    max_messages: int,
+    timeout_seconds: float | None,
+) -> tuple[tuple[TurnResult, ...], bool]:
+    orchestration_runner = asyncio.create_task(
+        orchestrator.run(max_turns=max_messages)
+    )
+    timed_out = False
+    try:
+        done, _ = await asyncio.wait(
+            {orchestration_runner, eventsub_runner},
+            timeout=timeout_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            timed_out = True
+            orchestration_runner.cancel()
+            await asyncio.gather(orchestration_runner, return_exceptions=True)
+            return tuple(orchestrator.results), timed_out
+        if orchestration_runner in done:
+            return orchestration_runner.result(), timed_out
+        eventsub_runner.result()
+        raise TwitchNetworkError("Twitch EventSub stopped unexpectedly")
+    finally:
+        if not orchestration_runner.done():
+            orchestration_runner.cancel()
+            await asyncio.gather(orchestration_runner, return_exceptions=True)
+
+
+def _phase5_missing_prerequisites(config: LoadedAppConfig) -> list[str]:
+    required_files = (
+        ("VTS 授權檔", config.token_path),
+        ("Twitch DPAPI 授權檔", config.twitch_token_path),
+        ("llama-server API key 檔案（只檢查存在，不讀取內容）", config.llm_api_key_path),
+        ("NightRain 語意動作映射", config.actions_path),
+        ("llama.cpp 執行檔", config.llama_server_path),
+        ("Gemma 模型檔", config.llm_model_path),
+        ("eSpeak NG 執行檔", config.espeak_ng_path),
+    )
+    missing = [
+        f"未找到{label}：{path}"
+        for label, path in required_files
+        if not path.is_file()
+    ]
+    if not config.espeak_data_path.is_dir():
+        missing.append(f"未找到 eSpeak NG 語音資料：{config.espeak_data_path}")
+    if not _vts_online(config.data.vts.url):
+        missing.append(f"VTube Studio 尚未開啟 API：{config.data.vts.url}")
+    return missing
+
+
+async def _close_phase5_eventsub(
+    eventsub: EventSubClient, runner: asyncio.Task[None]
+) -> None:
+    await eventsub.close()
+    if not runner.done():
+        runner.cancel()
+    try:
+        await finish_task(runner)
+    except asyncio.CancelledError:
+        if not runner.cancelled():
+            raise
+
+
+async def _phase5_command(
+    config: LoadedAppConfig,
+    *,
+    max_messages: int,
+    audio_device: str | None,
+    smoke_timeout_seconds: float | None,
+    output_path: Path | None,
+    server_pid: int | None,
+    test_channel: str | None = None,
+) -> int:
+    if max_messages < 0:
+        raise ConfigError("--max-messages 不得小於零")
+    smoke_mode = smoke_timeout_seconds is not None
+    if smoke_mode and max_messages < 1:
+        raise ConfigError("Phase 5 實機測試至少需要一則訊息")
+    if smoke_mode and max_messages > 1_000:
+        raise ConfigError("Phase 5 實機測試最多接受 1000 輪")
+    if smoke_timeout_seconds is not None and (
+        not math.isfinite(smoke_timeout_seconds)
+        or not 0 < smoke_timeout_seconds <= 7200
+    ):
+        raise ConfigError("--timeout 必須介於零至 7200 秒之間且不含零")
+    if server_pid is not None and server_pid <= 0:
+        raise ConfigError("--server-pid 必須大於零")
+    resolved_output = (
+        default_phase5_report_path(config.llm_benchmarks_path)
+        if output_path is None else config.resolve(output_path)
+    )
+    if smoke_mode and resolved_output.suffix.casefold() != ".json":
+        raise ConfigError("實機報告的 --output 必須使用 .json 副檔名")
+    if smoke_mode and resolved_output.resolve() in {
+        path.resolve() for path in (
+            config.source, config.actions_path, config.inventory_path,
+            config.token_path, config.twitch_token_path, config.llm_api_key_path,
+            config.llm_server_state_path,
+        )
+    }:
+        raise ConfigError("實機報告不得覆蓋設定、盤點、執行狀態或授權檔")
+    channel = test_channel.strip().casefold() if test_channel is not None else None
+    if smoke_mode:
+        missing = _phase5_missing_prerequisites(config)
+        if not channel:
+            missing.append("尚未指定測試頻道：請使用 --test-channel 明確指定已授權的頻道登入名稱。")
+        if missing:
+            report = build_blocked_report(
+                requested_turns=max_messages,
+                reasons=missing,
+                llm_settings=config.data.llm,
+                tts_settings=config.data.tts,
+            )
+            write_phase5_report(resolved_output, report)
+            _print_json({
+                "status": "blocked",
+                "description": report["description"],
+                "blockers": missing,
+                "report": str(resolved_output),
+                "中文紀錄": str(resolved_output.with_suffix(".md")),
+            })
+            return 2
+    if not channel:
+        raise ConfigError("請以 --test-channel 明確指定測試頻道，避免誤用正式聊天室")
+
+    actions = load_actions_config(config.actions_path)
+    contract = _build_llm_contract(config)
+    prompt = _build_llm_prompt(config, contract)
+    orchestration = config.data.orchestration
+    incoming = BoundedPriorityChatQueue(
+        max_size=orchestration.message_queue_size,
+        ttl_seconds=orchestration.message_ttl_seconds,
+        per_user_cooldown_seconds=(
+            orchestration.per_user_cooldown_seconds
+        ),
+        high_priority_message_types=(
+            orchestration.high_priority_message_types
+        ),
+    )
+    vts_client = _build_client(config)
+    service = VTSService(vts_client)
+    executor = ActionExecutor(service, actions)
+    try:
+        reactions = VTSReactionRuntime(
+            executor,
+            actions,
+            allowed_emotions=config.data.llm.allowed_emotions,
+            allowed_actions=contract.allowed_actions,
+            emotion_actions=orchestration.emotion_actions,
+            cleanup_timeout_seconds=orchestration.cleanup_timeout_seconds,
+            operation_timeout_seconds=orchestration.vts_operation_timeout_seconds,
+        )
+    except ValueError as error:
+        raise ConfigError(f"Phase 5 VTS 映射無效：{error}") from error
+
+    mouth_action = actions.smoke.mouth
+    if mouth_action is None:
+        raise ConfigError("smoke.mouth 尚未設定嘴型動作")
+    mouth = FaultTolerantMouthSink(
+        ConfiguredMouthSink(
+            service,
+            actions,
+            semantic_name=mouth_action,
+        ),
+        operation_timeout_seconds=orchestration.vts_operation_timeout_seconds,
+    )
+    playback = SpeechPlaybackQueue(
+        SoundDeviceOutput(device=audio_device),
+        mouth,
+        FileSubtitleSink(config.subtitle_path),
+        max_queue_size=config.data.tts.playback_queue_size,
+        envelope_frame_rate=config.data.tts.envelope_frame_rate,
+    )
+    speech = SerializedSpeechRuntime(
+        _build_tts_engine(config),
+        playback,
+        cleanup_timeout_seconds=orchestration.cleanup_timeout_seconds,
+    )
+
+    eventsub: EventSubClient | None = None
+    eventsub_runner: asyncio.Task[None] | None = None
+    results: tuple[TurnResult, ...] = ()
+    timed_out = False
+    resource_summary = None
+    resources: ResourceSampler | None = None
+    orchestrator: AIVTuberOrchestrator | None = None
+    started_at: float | None = None
+    failure_types: list[str] = []
+    cancelled = False
+    try:
+        async with AsyncExitStack() as stack:
+            http_client = await stack.enter_async_context(
+                httpx.AsyncClient(timeout=config.data.twitch.request_timeout_seconds)
+            )
+            stack.push_async_callback(vts_client.close)
+            stack.push_async_callback(reactions.close)
+            stack.push_async_callback(speech.close)
+            auth, helix = _build_twitch_clients(config, http_client)
+            twitch_session = await auth.get_session()
+            if twitch_session.identity.login.casefold() != channel:
+                raise ConfigError("指定測試頻道與目前 Twitch 授權身份不同；未建立訂閱或發送訊息")
+            llm = _build_llm_client(config, http_client)
+            if smoke_mode:
+                await llm.health()
+                await vts_client.connect()
+                inventory = await service.refresh_inventory()
+                if inventory.model.model_id != actions.model_id:
+                    raise ConfigError(
+                        "本機 NightRain 動作映射與目前載入的 VTS 模型不一致"
+                    )
+
+            chat = TwitchReplySink(
+                helix,
+                broadcaster_user_id=twitch_session.identity.user_id,
+                sender_user_id=twitch_session.identity.user_id,
+            )
+            orchestrator = AIVTuberOrchestrator(
+                incoming,
+                llm,
+                contract,
+                prompt,
+                reactions,
+                speech,
+                chat,
+                response_cooldown_seconds=(
+                    orchestration.response_cooldown_seconds
+                ),
+                action_lead_seconds=orchestration.action_lead_seconds,
+                result_history_size=(
+                    max_messages if smoke_mode else 100
+                ),
+                state_history_size=max_messages * 6 + 3 if smoke_mode else 256,
+            )
+            eventsub = EventSubClient(
+                config.data.twitch,
+                auth,
+                helix,
+                incoming,
+            )
+            eventsub_runner = asyncio.create_task(eventsub.run())
+            stack.push_async_callback(
+                _close_phase5_eventsub, eventsub, eventsub_runner
+            )
+            await _await_while_eventsub_runs(
+                eventsub.ready.wait(),
+                eventsub_runner,
+                timeout=config.data.twitch.request_timeout_seconds + 10,
+                timeout_message="等待 Twitch EventSub 啟動逾時",
+            )
+            _print_json(
+                {
+                    "status": "listening",
+                    "mode": "phase5_smoke" if smoke_mode else "run",
+                    "description": "已就緒，等待另一個帳號送入測試聊天室訊息；不會自動開播。",
+                    "subscription_id": eventsub.subscription_id,
+                    "message_limit": max_messages,
+                    "automatic_broadcast": False,
+                }
+            )
+
+            started_at = time.perf_counter()
+            if smoke_mode:
+                state = read_server_state(config.llm_server_state_path)
+                measured_pid = (
+                    server_pid
+                    if server_pid is not None
+                    else (state.pid if state is not None else None)
+                )
+                resources = ResourceSampler(
+                    server_pid=measured_pid,
+                    vts_probe=lambda: _vts_online(config.data.vts.url),
+                )
+                async with resources:
+                    results, timed_out = await _wait_for_phase5_completion(
+                        orchestrator,
+                        eventsub_runner,
+                        max_messages=max_messages,
+                        timeout_seconds=smoke_timeout_seconds,
+                    )
+                resource_summary = resources.summary()
+            else:
+                results, timed_out = await _wait_for_phase5_completion(
+                    orchestrator,
+                    eventsub_runner,
+                    max_messages=max_messages,
+                    timeout_seconds=None,
+                )
+    except asyncio.CancelledError:
+        if not smoke_mode:
+            raise
+        cancelled = True
+        failure_types.append("CancelledError")
+    except (
+        ConfigError,
+        TwitchError,
+        LLMError,
+        ActionMappingError,
+        VTSConnectionError,
+        VTSAuthenticationError,
+        VTSProtocolError,
+        VTSAPIError,
+        ModelChangedDuringInventoryError,
+        NoModelLoadedError,
+        SpeechPipelineError,
+        ReactionError,
+        OSError,
+    ) as error:
+        if not smoke_mode:
+            raise
+        failure_types.append(type(error).__name__)
+    finally:
+        incoming.close()
+
+    if smoke_mode:
+        if resources is not None and resources.snapshots:
+            resource_summary = resources.summary()
+        if orchestrator is not None:
+            results = orchestrator.results
+        if resource_summary is None:
+            report = build_blocked_report(
+                requested_turns=max_messages,
+                reasons=[
+                    f"啟動或收尾失敗（{kind}）；原始錯誤內容未寫入報告。"
+                    for kind in failure_types
+                ],
+                llm_settings=config.data.llm,
+                tts_settings=config.data.tts,
+            )
+        else:
+            report = build_phase5_report(
+                results,
+                queue_stats=incoming.stats(),
+                resources=resource_summary,
+                requested_turns=max_messages,
+                timed_out=timed_out,
+                mouth_failure_count=mouth.failure_count,
+                elapsed_seconds=(
+                    time.perf_counter() - started_at if started_at is not None else None
+                ),
+                failure_types=tuple(failure_types),
+                llm_settings=config.data.llm,
+                tts_settings=config.data.tts,
+                transitions=(
+                    tuple(orchestrator.state.history) if orchestrator is not None else ()
+                ),
+            )
+        write_phase5_report(resolved_output, report)
+        _print_json(
+            {
+                "status": report["status"],
+                "report": str(resolved_output),
+                "中文紀錄": str(resolved_output.with_suffix(".md")),
+                "description": report["description"],
+                "summary": report["summary"],
+                "queue": report.get("queue"),
+                "resources": report["resources"],
+                "automatic_broadcast": False,
+            }
+        )
+        if cancelled:
+            return 130
+        return 0 if report["status"] == "passed" else 2
+
+    _print_json(
+        {
+            "status": "stopped",
+            "processed_turns": (
+                orchestrator.processed_turns if orchestrator is not None else 0
+            ),
+            "queue": asdict(incoming.stats()),
+        }
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-vtuber",
-        description="Local AI VTuber Phase 0/1/2/3/4 tools",
+        description="Local AI VTuber Phase 0/1/2/3/4/5 tools",
     )
     parser.add_argument(
         "--config",
@@ -1209,6 +1627,58 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Benchmark report path; defaults under .local/benchmarks",
     )
+    run = subparsers.add_parser(
+        "run",
+        help="啟動 Twitch、LLM、VTS、TTS 的整合回應流程",
+    )
+    run.add_argument(
+        "--max-messages",
+        type=int,
+        default=0,
+        help="Stop after this many selected turns; zero runs until cancelled",
+    )
+    run.add_argument(
+        "--audio-device",
+        help="Optional PortAudio output device name or identifier",
+    )
+    run.add_argument(
+        "--test-channel",
+        help="明確指定測試頻道登入名稱，必須與現有 Twitch 授權身份相同",
+    )
+    phase5_smoke = subparsers.add_parser(
+        "phase5-smoke",
+        help="在測試頻道執行有限輪次整合測試，保存繁體中文報告與量測",
+    )
+    phase5_smoke.add_argument(
+        "--messages",
+        type=int,
+        default=1,
+        help="要處理的外部測試訊息輪次（預設 1，最多 1000）",
+    )
+    phase5_smoke.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="整體等待上限秒數（預設 600，最多 7200）",
+    )
+    phase5_smoke.add_argument(
+        "--audio-device",
+        help="指定 PortAudio 輸出裝置名稱或識別碼",
+    )
+    phase5_smoke.add_argument(
+        "--server-pid",
+        type=int,
+        help="量測 llama-server 工作集所使用的程序識別碼",
+    )
+    phase5_smoke.add_argument(
+        "--output",
+        type=Path,
+        help="JSON 報告路徑；會另外產生同名的繁體中文 .md 報告",
+    )
+    phase5_smoke.add_argument(
+        "--test-channel",
+        help="明確指定測試頻道登入名稱；未指定時只保存受阻報告，不收發訊息",
+    )
     return parser
 
 
@@ -1313,6 +1783,30 @@ def main(argv: list[str] | None = None) -> int:
                     output_path=args.output,
                 )
             )
+        if args.command == "run":
+            return asyncio.run(
+                _phase5_command(
+                    config,
+                    max_messages=args.max_messages,
+                    audio_device=args.audio_device,
+                    smoke_timeout_seconds=None,
+                    output_path=None,
+                    server_pid=None,
+                    test_channel=args.test_channel,
+                )
+            )
+        if args.command == "phase5-smoke":
+            return asyncio.run(
+                _phase5_command(
+                    config,
+                    max_messages=args.messages,
+                    audio_device=args.audio_device,
+                    smoke_timeout_seconds=args.timeout,
+                    output_path=args.output,
+                    server_pid=args.server_pid,
+                    test_channel=args.test_channel,
+                )
+            )
         raise AssertionError(f"Unhandled command: {args.command}")
     except (
         ActionMappingError,
@@ -1327,6 +1821,8 @@ def main(argv: list[str] | None = None) -> int:
         TTSError,
         LLMError,
         LLMOutputRejected,
+        ReactionError,
+        SpeechPipelineError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

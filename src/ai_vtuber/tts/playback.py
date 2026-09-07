@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from uuid import uuid4
 
+from ai_vtuber.tasks import finish_task
 from ai_vtuber.tts.audio import PCMBuffer, VolumeEnvelope, build_volume_envelope
 from ai_vtuber.tts.engine import SynthesizedSpeech
 from ai_vtuber.tts.subtitles import SubtitleSink
@@ -20,6 +22,8 @@ class AudioPlayback(Protocol):
 
     @property
     def done(self) -> bool: ...
+
+    async def wait_started(self) -> float | None: ...
 
     async def wait(self) -> None: ...
 
@@ -42,6 +46,7 @@ class MouthSink(Protocol):
 class PlaybackResult:
     job_id: str
     status: PlaybackStatus
+    completed_at: float | None = None
 
 
 class PlaybackTicket:
@@ -49,12 +54,17 @@ class PlaybackTicket:
         self,
         job_id: str,
         future: asyncio.Future[PlaybackResult],
+        started: asyncio.Future[float | None],
     ) -> None:
         self.job_id = job_id
         self._future = future
+        self._started = started
 
     async def wait(self) -> PlaybackResult:
         return await asyncio.shield(self._future)
+
+    async def wait_started(self) -> float | None:
+        return await asyncio.shield(self._started)
 
 
 @dataclass(slots=True)
@@ -63,6 +73,8 @@ class _QueuedSpeech:
     speech: SynthesizedSpeech
     envelope: VolumeEnvelope
     future: asyncio.Future[PlaybackResult]
+    started: asyncio.Future[float | None]
+    completed_at: float | None = None
 
 
 _STOP = object()
@@ -78,6 +90,7 @@ class SpeechPlaybackQueue:
         max_queue_size: int = 16,
         envelope_frame_rate: int = 30,
         sleep: Sleep = asyncio.sleep,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         if max_queue_size < 1:
             raise ValueError("Playback queue size must be at least one")
@@ -88,6 +101,7 @@ class SpeechPlaybackQueue:
         self.subtitles = subtitles
         self.envelope_frame_rate = envelope_frame_rate
         self.sleep = sleep
+        self.clock = clock
         self._queue: asyncio.Queue[_QueuedSpeech | object] = asyncio.Queue(
             maxsize=max_queue_size
         )
@@ -104,7 +118,8 @@ class SpeechPlaybackQueue:
         await self.close()
 
     async def enqueue(self, speech: SynthesizedSpeech) -> PlaybackTicket:
-        envelope = build_volume_envelope(
+        envelope = await asyncio.to_thread(
+            build_volume_envelope,
             speech.audio,
             frame_rate=self.envelope_frame_rate,
         )
@@ -114,6 +129,7 @@ class SpeechPlaybackQueue:
             speech=speech,
             envelope=envelope,
             future=loop.create_future(),
+            started=loop.create_future(),
         )
         async with self._control_lock:
             if self._closed:
@@ -123,15 +139,16 @@ class SpeechPlaybackQueue:
                 self._queue.put_nowait(job)
             except asyncio.QueueFull as error:
                 raise RuntimeError("Speech playback queue is full") from error
-        return PlaybackTicket(job.job_id, job.future)
+        return PlaybackTicket(job.job_id, job.future, job.started)
 
     async def cancel_current(self) -> bool:
         async with self._control_lock:
             current = self._current_task
             if current is None or current.done():
                 return False
-            current.cancel()
-        await asyncio.gather(current, return_exceptions=True)
+            if not current.cancelling():
+                current.cancel()
+        await self._join_playback(current)
         return True
 
     async def clear(self) -> int:
@@ -139,28 +156,43 @@ class SpeechPlaybackQueue:
             cancelled = self._cancel_pending()
             current = self._current_task
             if current is not None and not current.done():
-                current.cancel()
+                if not current.cancelling():
+                    current.cancel()
                 cancelled += 1
         if current is not None:
-            await asyncio.gather(current, return_exceptions=True)
+            await self._join_playback(current)
         return cancelled
 
     async def close(self) -> None:
         async with self._control_lock:
-            if self._closed:
-                return
+            was_closed = self._closed
             self._closed = True
-            self._cancel_pending()
+            if not was_closed:
+                self._cancel_pending()
             current = self._current_task
-            if current is not None and not current.done():
+            if (
+                current is not None
+                and not current.done()
+                and not current.cancelling()
+            ):
                 current.cancel()
             worker = self._worker
-            if worker is not None:
+            if worker is not None and not was_closed:
                 self._queue.put_nowait(_STOP)
-        if current is not None:
-            await asyncio.gather(current, return_exceptions=True)
-        if worker is not None:
-            await worker
+        try:
+            if current is not None:
+                await self._join_playback(current)
+        finally:
+            if worker is not None:
+                await finish_task(worker)
+
+    @staticmethod
+    async def _join_playback(task: asyncio.Task[None]) -> None:
+        try:
+            await finish_task(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
 
     def _ensure_worker(self) -> None:
         if self._worker is None:
@@ -201,6 +233,8 @@ class SpeechPlaybackQueue:
                 except asyncio.CancelledError:
                     self._set_result(item, "cancelled")
                 except Exception as error:
+                    if not item.started.done():
+                        item.started.set_result(None)
                     if not item.future.done():
                         item.future.set_exception(error)
                 else:
@@ -219,7 +253,13 @@ class SpeechPlaybackQueue:
             await self.mouth.prepare()
             await self.subtitles.show(job.speech.text)
             playback = await self.output.start(job.speech.audio)
-            wait_task = asyncio.create_task(playback.wait())
+            started_at = await playback.wait_started()
+            if started_at is None:
+                await playback.wait()
+                raise RuntimeError("Audio playback ended before it started")
+            if not job.started.done():
+                job.started.set_result(started_at)
+            wait_task = asyncio.create_task(self._wait_audio(playback, job))
             mouth_task = asyncio.create_task(
                 self._drive_mouth(
                     playback,
@@ -235,21 +275,39 @@ class SpeechPlaybackQueue:
                 mouth_task.result()
             await wait_task
         finally:
-            for task in (wait_task, mouth_task):
-                if task is not None and not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *(task for task in (wait_task, mouth_task) if task is not None),
-                return_exceptions=True,
+            await finish_task(
+                asyncio.create_task(
+                    self._cleanup(playback, wait_task, mouth_task)
+                )
             )
+
+    async def _wait_audio(
+        self, playback: AudioPlayback, job: _QueuedSpeech
+    ) -> None:
+        await playback.wait()
+        job.completed_at = self.clock()
+
+    async def _cleanup(
+        self,
+        playback: AudioPlayback | None,
+        wait_task: asyncio.Task[None] | None,
+        mouth_task: asyncio.Task[None] | None,
+    ) -> None:
+        for task in (wait_task, mouth_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (wait_task, mouth_task) if task is not None),
+            return_exceptions=True,
+        )
+        try:
+            if playback is not None and not playback.done:
+                await playback.stop()
+        finally:
             try:
-                if playback is not None and not playback.done:
-                    await playback.stop()
+                await self.mouth.reset()
             finally:
-                try:
-                    await self.mouth.reset()
-                finally:
-                    await self.subtitles.clear()
+                await self.subtitles.clear()
 
     async def _drive_mouth(
         self,
@@ -270,8 +328,12 @@ class SpeechPlaybackQueue:
 
     @staticmethod
     def _set_result(job: _QueuedSpeech, status: PlaybackStatus) -> None:
+        if not job.started.done():
+            job.started.set_result(None)
         if not job.future.done():
-            job.future.set_result(PlaybackResult(job.job_id, status))
+            job.future.set_result(
+                PlaybackResult(job.job_id, status, job.completed_at)
+            )
 
 
 class NullMouthSink:
