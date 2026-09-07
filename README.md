@@ -1,5 +1,8 @@
 # AI VTuber Local
 
+**先看結果：[Phase 5 一頁式結論](docs/phase-5-result.md)。一小時實機測試尚未開始，
+`main` 尚未同步；離線通過不等於實機驗收完成。**
+
 Phase 0～4 已完成；Phase 5 整合程式已建立，但**尚未通過實機完整驗收**。
 既有功能包含 Python 專案基礎、VTube Studio
 控制、Twitch 官方 Device Code Grant、EventSub WebSocket 收訊和 Helix
