@@ -1,7 +1,7 @@
 # AI VTuber Local
 
-**先看結果：[Phase 5 一頁式結論](docs/phase-5-result.md)。一小時實機測試尚未開始，
-`main` 尚未同步；離線通過不等於實機驗收完成。**
+**先看結果：[Phase 5 一頁式結論](docs/phase-5-result.md)。一小時實機測試尚未開始；
+Phase 5 程式已合併並同步至 `main`，但離線通過不等於實機驗收完成。**
 
 Phase 0～4 已完成；Phase 5 整合程式已建立，但**尚未通過實機完整驗收**。
 既有功能包含 Python 專案基礎、VTube Studio
@@ -10,9 +10,10 @@ Send Chat Message、以 llama.cpp 執行的本地結構化 LLM，以及本機 TT
 字幕與 MouthOpen 同步，並已串成有界、可打斷且故障隔離的自動回應流程。尚未加入
 OBS、長期記憶、額外內容過濾或高品質語音模型。
 
-本輪實際工作目錄、修改清單、回歸測例、命令結果與未完成事項，均以繁體中文記錄於
-[`docs/phase-5-work-log.md`](docs/phase-5-work-log.md)。隔離 worktree 的修改不會自動
-出現在 `F:\user\Documents\Workspace\AI Vtuber` 主 checkout。
+接手施工先閱讀 [`docs/phase-5-handoff-to-codex.md`](docs/phase-5-handoff-to-codex.md)；
+本輪修改清單、回歸測例、命令結果與未完成事項記錄於
+[`docs/phase-5-work-log.md`](docs/phase-5-work-log.md)。Phase 5 的 PR #1 已合併，本機主
+checkout 已於 2026-09-14 同步至 merge commit `17a9e77`。
 
 ## 安裝
 
