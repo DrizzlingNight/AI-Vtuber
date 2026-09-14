@@ -32,6 +32,10 @@ class EventSubConnection(Protocol):
     async def close(self) -> None: ...
 
 
+class ChatMessageSink(Protocol):
+    def put_nowait(self, message: TwitchChatMessage) -> object: ...
+
+
 ConnectionFactory = Callable[[str, float], Awaitable[EventSubConnection]]
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -79,7 +83,7 @@ class EventSubClient:
         settings: TwitchSettings,
         auth: TwitchAuth,
         helix: TwitchHelixClient,
-        message_queue: asyncio.Queue[TwitchChatMessage],
+        message_queue: ChatMessageSink,
         *,
         connection_factory: ConnectionFactory = open_eventsub_websocket,
         sleep: Sleep = asyncio.sleep,

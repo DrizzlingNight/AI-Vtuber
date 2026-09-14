@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from ai_vtuber.vts.actions import (
     run_smoke,
 )
 from ai_vtuber.vts.inventory import VTSInventory
+from ai_vtuber.vts.client import VTSConnectionError
 
 
 class FakeService:
@@ -206,3 +208,87 @@ async def test_parameter_outside_discovered_range_is_rejected(
         await executor.execute("mouth_open")
 
     assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_expression_is_held_until_speech_releases_it(
+    inventory: VTSInventory,
+) -> None:
+    service = FakeService(inventory)
+    executor = ActionExecutor(service, full_config(), sleep=no_sleep)  # type: ignore[arg-type]
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    action = asyncio.create_task(
+        executor.execute("happy", ready=ready, release=release)
+    )
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    assert service.calls == [("expression", "Happy.exp3.json", True, 0.0)]
+    assert not action.done()
+    release.set()
+    await action
+    assert service.calls[-1] == ("expression", "Happy.exp3.json", False, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_parameter_action_scales_validated_intensity(
+    inventory: VTSInventory,
+) -> None:
+    service = FakeService(inventory)
+    executor = ActionExecutor(service, full_config(), sleep=no_sleep)  # type: ignore[arg-type]
+    ready = asyncio.Event()
+
+    await executor.execute("nod", ready=ready, intensity=0.25)
+
+    assert ready.is_set()
+    assert max(call[2] for call in service.calls) == pytest.approx(1.5)
+    assert service.calls[-1] == ("parameter", "FaceAngleY", 0.0, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_held_expression_cleanup_refuses_a_different_model(
+    inventory: VTSInventory,
+) -> None:
+    service = FakeService(inventory)
+    executor = ActionExecutor(service, full_config(), sleep=no_sleep)  # type: ignore[arg-type]
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    action = asyncio.create_task(
+        executor.execute("happy", ready=ready, release=release)
+    )
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    service.inventory = replace(
+        inventory, model=replace(inventory.model, model_id="other-model")
+    )
+    release.set()
+
+    with pytest.raises(ActionMappingError, match="current model"):
+        await action
+    assert service.calls == [("expression", "Happy.exp3.json", True, 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_failed_expression_restore_is_retried_before_next_action(
+    inventory: VTSInventory,
+) -> None:
+    class RecoveringService(FakeService):
+        fail_reset = True
+
+        async def set_expression(
+            self, expression_file: str, *, active: bool, fade_seconds: float
+        ) -> None:
+            if not active and self.fail_reset:
+                self.fail_reset = False
+                raise VTSConnectionError("temporary disconnect during restore")
+            await super().set_expression(
+                expression_file, active=active, fade_seconds=fade_seconds
+            )
+
+    service = RecoveringService(inventory)
+    executor = ActionExecutor(service, full_config(), sleep=no_sleep)  # type: ignore[arg-type]
+    with pytest.raises(VTSConnectionError):
+        await executor.execute("happy")
+    service.calls.clear()
+
+    await executor.execute("nod")
+
+    assert service.calls[0] == ("expression", "Happy.exp3.json", False, 0.0)

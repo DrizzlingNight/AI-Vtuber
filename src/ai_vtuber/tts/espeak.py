@@ -8,6 +8,7 @@ from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 
+from ai_vtuber.tasks import run_blocking
 from ai_vtuber.tts.audio import AudioFormatError, PCMBuffer
 from ai_vtuber.tts.engine import (
     TTSError,
@@ -58,7 +59,9 @@ class EspeakNGEngine:
 
     async def synthesize(self, text: str) -> SynthesizedSpeech:
         normalized = _validate_speech_text(text)
-        return await asyncio.to_thread(self._synthesize_sync, normalized)
+        return await asyncio.shield(
+            run_blocking(lambda: self._synthesize_sync(normalized))
+        )
 
     def _synthesize_sync(self, text: str) -> SynthesizedSpeech:
         self._verify_runtime()

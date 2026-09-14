@@ -292,14 +292,77 @@ class TTSSettings(StrictModel):
         return value
 
 
+class OrchestrationSettings(StrictModel):
+    message_queue_size: int = Field(default=32, ge=1, le=1_000)
+    message_ttl_seconds: float = Field(default=30.0, gt=0, le=300)
+    per_user_cooldown_seconds: float = Field(default=2.0, ge=0, le=60)
+    response_cooldown_seconds: float = Field(default=5.0, ge=0, le=60)
+    action_lead_seconds: float = Field(default=0.15, ge=0, le=5)
+    cleanup_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    vts_operation_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    high_priority_message_types: tuple[str, ...] = (
+        "channel_points_highlighted",
+        "power_ups_gigantified_emote",
+    )
+    emotion_actions: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("high_priority_message_types")
+    @classmethod
+    def validate_priority_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("High-priority message types must not contain duplicates")
+        if any(
+            not item
+            or not item.isascii()
+            or not item.replace("_", "").isalnum()
+            for item in value
+        ):
+            raise ValueError(
+                "High-priority message types must be ASCII identifiers"
+            )
+        return value
+
+    @field_validator("emotion_actions")
+    @classmethod
+    def validate_emotion_actions(cls, value: dict[str, str]) -> dict[str, str]:
+        for emotion, action in value.items():
+            if not emotion or not action:
+                raise ValueError("Emotion action mappings must not be empty")
+            if any(
+                not name.replace("_", "").isalnum() or not name[0].isalpha()
+                for name in (emotion, action)
+            ):
+                raise ValueError(
+                    "Emotion action mappings must use semantic identifiers"
+                )
+        return value
+
+
 class AppConfig(StrictModel):
     vts: VTSSettings
     twitch: TwitchSettings = Field(default_factory=TwitchSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
+    orchestration: OrchestrationSettings = Field(
+        default_factory=OrchestrationSettings
+    )
     paths: ProjectPaths
     discovery: DiscoverySettings
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+
+    @model_validator(mode="after")
+    def validate_orchestration_emotions(self) -> AppConfig:
+        unknown = sorted(
+            set(self.orchestration.emotion_actions).difference(
+                self.llm.allowed_emotions
+            )
+        )
+        if unknown:
+            raise ValueError(
+                "Orchestration emotion mappings contain unknown LLM emotions: "
+                + ", ".join(unknown)
+            )
+        return self
 
 
 class HotkeyAction(StrictModel):

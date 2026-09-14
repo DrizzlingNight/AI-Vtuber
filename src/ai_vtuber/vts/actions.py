@@ -172,13 +172,10 @@ class ActionExecutor:
         self.config = config
         self.sleep = sleep
         self.logger = logger or logging.getLogger("ai_vtuber.vts.actions")
+        self._pending_expressions: dict[str, tuple[bool, float]] = {}
+        self._pending_parameters: dict[str, float] = {}
 
-    async def execute(self, semantic_name: str) -> None:
-        binding = self.config.actions.get(semantic_name)
-        if binding is None:
-            raise UnknownActionError(
-                f"Action {semantic_name!r} is not in the semantic whitelist"
-            )
+    async def _current_inventory(self) -> VTSInventory:
         inventory = await self.service.ensure_inventory_current()
         if inventory.model.model_id != self.config.model_id:
             raise ActionMappingError(
@@ -187,6 +184,44 @@ class ActionExecutor:
                 f"{inventory.model.name!r} ({inventory.model.model_id}); "
                 "run inventory again"
             )
+        return inventory
+
+    async def restore(self) -> None:
+        if not self._pending_expressions and not self._pending_parameters:
+            return
+        inventory = await self._current_inventory()
+        for target, (active, fade) in tuple(self._pending_expressions.items()):
+            resource = inventory.find_expression(target)
+            if resource is None:
+                raise ActionMappingError("The expression to restore is no longer mapped")
+            await self.service.set_expression(
+                resource.file, active=active, fade_seconds=fade
+            )
+            del self._pending_expressions[target]
+        for target, neutral in tuple(self._pending_parameters.items()):
+            resource = inventory.find_input_parameter(target)
+            if resource is None or not resource.minimum <= neutral <= resource.maximum:
+                raise ActionMappingError("The parameter to restore is no longer valid")
+            await self.service.inject_parameter(resource.name, neutral, weight=1.0)
+            del self._pending_parameters[target]
+
+    async def execute(
+        self,
+        semantic_name: str,
+        *,
+        ready: asyncio.Event | None = None,
+        release: asyncio.Event | None = None,
+        intensity: float = 1.0,
+    ) -> None:
+        if not 0 <= intensity <= 1:
+            raise ActionMappingError("Action intensity must be between zero and one")
+        binding = self.config.actions.get(semantic_name)
+        if binding is None:
+            raise UnknownActionError(
+                f"Action {semantic_name!r} is not in the semantic whitelist"
+            )
+        await self.restore()
+        inventory = await self._current_inventory()
         log_event(
             self.logger,
             logging.INFO,
@@ -195,11 +230,15 @@ class ActionExecutor:
             kind=binding.kind,
         )
         if isinstance(binding, HotkeyAction):
-            await self._execute_hotkey(binding, inventory)
+            await self._execute_hotkey(binding, inventory, ready=ready)
         elif isinstance(binding, ExpressionAction):
-            await self._execute_expression(binding, inventory)
+            await self._execute_expression(
+                binding, inventory, ready=ready, release=release
+            )
         else:
-            await self._execute_parameter(binding, inventory)
+            await self._execute_parameter(
+                binding, inventory, ready=ready, intensity=intensity
+            )
         log_event(
             self.logger,
             logging.INFO,
@@ -212,6 +251,8 @@ class ActionExecutor:
         self,
         binding: HotkeyAction,
         inventory: VTSInventory,
+        *,
+        ready: asyncio.Event | None = None,
     ) -> None:
         hotkey = inventory.find_hotkey(binding.target)
         if hotkey is None:
@@ -226,55 +267,66 @@ class ActionExecutor:
         original_expression_state = (
             related_expression.active if related_expression else None
         )
+        if related_expression is not None:
+            self._pending_expressions[related_expression.file] = (
+                bool(original_expression_state), 0.2
+            )
         try:
             await self.service.trigger_hotkey(hotkey.hotkey_id)
+            if ready is not None:
+                ready.set()
             if binding.settle_seconds:
                 await self.sleep(binding.settle_seconds)
         finally:
             if related_expression is not None:
-                await self.service.set_expression(
-                    related_expression.file,
-                    active=bool(original_expression_state),
-                    fade_seconds=0.2,
-                )
+                await self.restore()
 
     async def _execute_expression(
         self,
         binding: ExpressionAction,
         inventory: VTSInventory,
+        *,
+        ready: asyncio.Event | None = None,
+        release: asyncio.Event | None = None,
     ) -> None:
         expression = inventory.find_expression(binding.target)
         if expression is None:
             raise ActionMappingError(
                 f"Expression target {binding.target!r} is missing or ambiguous"
             )
-        if expression.active:
-            await self.service.set_expression(
-                expression.file,
-                active=False,
-                fade_seconds=binding.fade_seconds,
-            )
-            if binding.fade_seconds:
-                await self.sleep(binding.fade_seconds)
+        self._pending_expressions[expression.file] = (
+            expression.active, binding.fade_seconds
+        )
         try:
+            if expression.active and release is None:
+                await self.service.set_expression(
+                    expression.file,
+                    active=False,
+                    fade_seconds=binding.fade_seconds,
+                )
+                if binding.fade_seconds:
+                    await self.sleep(binding.fade_seconds)
             await self.service.set_expression(
                 expression.file,
                 active=True,
                 fade_seconds=binding.fade_seconds,
             )
-            if binding.hold_seconds:
+            if ready is not None:
+                ready.set()
+            if release is not None:
+                await release.wait()
+            elif binding.hold_seconds:
                 await self.sleep(binding.hold_seconds)
         finally:
-            await self.service.set_expression(
-                expression.file,
-                active=expression.active,
-                fade_seconds=binding.fade_seconds,
-            )
+            await self.restore()
 
     async def _execute_parameter(
         self,
         binding: ParameterAction,
         inventory: VTSInventory,
+        *,
+        ready: asyncio.Event | None = None,
+        intensity: float = 1.0,
     ) -> None:
         parameter = inventory.find_input_parameter(binding.target)
         if parameter is None:
@@ -294,6 +346,7 @@ class ActionExecutor:
         sample_count = max(3, round(binding.duration_seconds * binding.fps))
         loop = asyncio.get_running_loop()
         started_at = loop.time()
+        self._pending_parameters[parameter.name] = binding.neutral_value
         try:
             for index in range(sample_count):
                 progress = index / (sample_count - 1)
@@ -304,18 +357,16 @@ class ActionExecutor:
                 envelope = math.sin(math.pi * progress)
                 value = binding.neutral_value + (
                     binding.peak_value - binding.neutral_value
-                ) * envelope
+                ) * envelope * intensity
                 await self.service.inject_parameter(
                     parameter.name,
                     value,
                     weight=binding.weight,
                 )
+                if ready is not None:
+                    ready.set()
         finally:
-            await self.service.inject_parameter(
-                parameter.name,
-                binding.neutral_value,
-                weight=1.0,
-            )
+            await self.restore()
 
 
 async def run_smoke(
