@@ -1,12 +1,21 @@
 ---
 name: operate-ai-vtuber-twitch
-description: 操作、設定、驗證、除錯或交接此程式庫的 Twitch Device Code Grant、DPAPI token、EventSub 收訊與 Helix 聊天發送。當工作涉及 twitch-auth、twitch-test-sender-auth、twitch-validate、twitch-listen、twitch-send、twitch-smoke、測試帳號、scope、token 更新或重連時使用；不適用於 VTS、LLM、TTS、整體 orchestration 或 Phase 完成判定。
+description: 建立、驗證或修復此程式庫與 Twitch 之間的連線邊界，包括帳號授權、DPAPI token、scope、EventSub 收訊、Helix 發送、測試帳號與重連。當問題是訊息能否進入或離開 Twitch 時使用；訊息進入內部佇列後的 LLM、VTS、TTS、排程、取消或整合驗收改用 operate-ai-vtuber-orchestration。
 ---
 
 # 操作 AI VTuber 的 Twitch 連線
 
-分開處理主帳號、外部測試帳號、EventSub 收訊與 Helix 發送，保留真實聊天室副作用與
-不確定網路結果的邊界。
+分開處理主帳號、外部測試帳號、EventSub 收訊與 Helix 發送；責任停在 Twitch transport
+邊界，不接管訊息進入內部佇列後的 AI VTuber 處理流程。
+
+## 責任與交接點
+
+- inbound 由本 skill 負責到 EventSub 事件完成驗證、轉成 `TwitchChatMessage` 並成功交給
+  message sink；之後的佇列排程與下游處理由 `$operate-ai-vtuber-orchestration` 負責。
+- outbound 由本 skill 負責 Twitch adapter 接到發送請求後的 Helix 呼叫、drop reason 與
+  不確定結果；回覆文字、發送時機及取消策略由 orchestration 決定。
+- 單獨驗證帳號、scope、收訊、發訊、測試帳號或重連時，只使用本 skill。完整鏈路測試以
+  orchestration skill 為主，只有需要查 Twitch 邊界時才回到本 skill。
 
 ## 載入必要情境
 
@@ -43,8 +52,8 @@ description: 操作、設定、驗證、除錯或交接此程式庫的 Twitch De
    `user:read:chat` 與 `user:write:chat`；未經使用者要求不要擴張權限。
 2. token 缺失、失效或使用者要求重新授權時，才執行對應 auth，並等使用者在官方 Twitch
    頁面完成授權。
-3. 驗證收訊時使用有限訊息數，確認外層 `metadata.message_id` 去重、主帳號自身訊息不入列；
-   受控自動輸入模式還必須排除非指定測試帳號的訊息。
+3. 驗證收訊時使用有限訊息數，確認外層 `metadata.message_id` 去重、主帳號自身訊息不交給
+   message sink；受控自動輸入模式還必須排除非指定測試帳號的訊息。
 4. `twitch-send`、`twitch-smoke` 及任何自動測試驅動都會真的向公開聊天室發訊息。只有任務
    明確要求，且已核對發送帳號、頻道與訊息來源時才能執行；關台後的聊天室仍可能公開可見。
 5. `is_sent: false` 時保留 `drop_reason`。Helix request 已送出但結果不確定時不得自動重試，

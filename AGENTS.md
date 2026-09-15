@@ -8,6 +8,10 @@
   `$operate-ai-vtuber-orchestration`。skill 只負責可重用操作方法，不定義 Phase 完成條件。
 - VTube Studio 資源校正、Twitch 帳號／收發操作與本地 LLM benchmark，分別使用
   `$calibrate-ai-vtuber-vts`、`$operate-ai-vtuber-twitch`、`$benchmark-ai-vtuber-llm`。
+- Twitch skill 的 inbound 責任截止於事件交給 message sink；outbound 責任則從發送請求
+  進入 Twitch adapter 到 Helix 回傳結果。訊息進入內部佇列後的排程、LLM、VTS、TTS、取消
+  與收尾屬於 orchestration skill。完整鏈路以 orchestration skill 為主，只在帳號、授權、
+  收發或重連問題上另載入 Twitch skill。
 - 對使用者的狀態摘要、驗收報告與新增專案文件使用繁體中文；程式識別字與外部工具
   的原始欄位名稱保持原樣。
 

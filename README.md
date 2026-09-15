@@ -410,7 +410,9 @@ LLM 明確選出的白名單 action 優先於情緒對應動作；沒有核准�
 Phase 文件負責輪數、時數、執行順序、指標門檻與完成狀態；repo skill 只保存跨階段可
 重用的安全操作、診斷與量測方法。現有核心管線與 Twitch skill 分別為
 `$operate-ai-vtuber-orchestration`、`$operate-ai-vtuber-twitch`，不另外建立綁定 Phase
-編號或驗收時數的 skill。
+編號或驗收時數的 skill。Twitch skill 的 inbound 責任截止於事件交給 message sink；
+outbound 責任則從發送請求進入 Twitch adapter 到 Helix 回傳結果。訊息進入內部佇列後的
+排程、LLM、VTS、TTS、取消與收尾由 orchestration skill 負責。
 
 ## 測試
 
