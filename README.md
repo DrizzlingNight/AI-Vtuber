@@ -1,9 +1,11 @@
 # AI VTuber Local
 
-**先看結果：[Phase 5 一頁式結論](docs/phase-5-result.md)。一小時實機測試尚未開始；
-Phase 5 程式已合併並同步至 `main`，但離線通過不等於實機驗收完成。**
+**先看結果：[Phase 5 一頁式結論](docs/phase-5-result.md)。Phase 5 核心互動鏈路已完成
+60／60 輪、至少一小時實機驗收；第二帳號驅動、預熱、收尾修正與長期 skill 重整已隨
+本次收尾提交同步至 `main`。**
 
-Phase 0～4 已完成；Phase 5 整合程式已建立，但**尚未通過實機完整驗收**。
+Phase 0～4 已完成；Phase 5 的 Twitch → LLM → VTS → TTS → Twitch 核心鏈路也已通過
+實機驗收，但**不包含 OBS 或直播穩定性**。
 既有功能包含 Python 專案基礎、VTube Studio
 控制、Twitch 官方 Device Code Grant、EventSub WebSocket 收訊和 Helix
 Send Chat Message、以 llama.cpp 執行的本地結構化 LLM，以及本機 TTS、音訊播放、
@@ -126,6 +128,19 @@ $env:TWITCH_CLIENT_ID = "貼上 Client ID"
 ```powershell
 .\.venv\Scripts\python.exe -m ai_vtuber twitch-validate
 ```
+
+受控實機驗收可另用第二個 Twitch 帳號驅動測試訊息。它使用獨立的 DPAPI
+授權檔，不會覆蓋主頻道授權；首次使用時，在另一個可見終端執行並以第二帳號完成
+官方 Device Code Grant：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber twitch-test-sender-auth
+.\.venv\Scripts\python.exe -m ai_vtuber twitch-test-sender-validate
+```
+
+第二帳號必須與主頻道帳號不同。程式只用它向明確指定的測試聊天室送出受控測試訊息；
+不取得密碼，也不控制帳號其他功能。訊息內容、數量、節奏、持續時間及通過門檻由對應
+Phase 驗收文件定義，不由 Twitch 操作 skill 固定。
 
 access token 與一次性 refresh token 會先由目前 Windows 使用者的 DPAPI 加密，再原子寫入
 `.local/secrets/twitch-token.bin`。檔案、`.local/` 與本機設定都由 `.gitignore` 排除；
@@ -328,29 +343,45 @@ VTS、TTS 或 Twitch 發送。
 
 ### Phase 5 實機 smoke
 
-先啟動既有 `llm-serve`，保持 VTube Studio 與 NightRain 開啟，再從另一個 Twitch
-帳號送出一則能觸發 `reply` 的測試訊息：
+先啟動既有 `llm-serve`，保持 VTube Studio 與 NightRain 開啟，並完成第二帳號的
+`twitch-test-sender-auth`。正式 smoke 由第二帳號自動送出固定安全訊息：
 
 ```powershell
 .\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
-  --test-channel "已授權的測試頻道登入名稱" --messages 1
+  --test-channel "已授權的測試頻道登入名稱" --messages 1 `
+  --auto-drive
 ```
 
 連續測試可增加訊息數量；命令有整體 timeout，不會無限等待：
 
 ```powershell
 .\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
-  --test-channel "已授權的測試頻道登入名稱" --messages 5 --timeout 900
+  --test-channel "已授權的測試頻道登入名稱" --messages 5 --timeout 900 `
+  --auto-drive
 ```
+
+一小時驗收使用 60 則自動訊息，從第一則到最後一則分散至少 3600 秒：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
+  --test-channel "已授權的測試頻道登入名稱" --messages 60 --timeout 4200 `
+  --auto-drive --drive-duration 3600
+```
+
+未加 `--auto-drive` 的人工第二帳號模式只保留給互動診斷。正式一小時完成判定另外要求
+第二帳號自動發送紀錄完整、60 則全部送出；自動模式只接受該第二帳號的訊息，避免其他
+聊天室訊息污染驗收輪次。
 
 報告會分別原子寫入 `.local/benchmarks/phase5-smoke-*.json` 及同名的**繁體中文 `.md`**
 文件，包含訊息收到至首 token、完整
 決策、首個 PCM block 寫入及播放完成的延遲，以及 system RAM、llama-server RSS、
 整體 GPU VRAM、GPU utilization 與 VTS 在線狀態。報告不保存聊天室文字、LLM 原始輸出、
-OAuth token、DPAPI store 內容或 llama-server API key。
+OAuth token、DPAPI store 內容或 llama-server API key。報告另列輸入驅動模式、第二帳號
+登入名稱、要求／已送訊息數與分散時間，但不保存訊息全文或任何授權內容。
 前置條件缺失、等待逾時、發送失敗或使用者取消也會留下明確的報告；缺少必要延遲、
 RAM 或 VRAM 時不得判為通過。`phase5_hour_acceptance` 另行標示至少一小時驗收，
-不能以單輪或幾分鐘的短測試替代。
+不能以單輪或幾分鐘的短測試替代。這份報告不量測 OBS、編碼、RTMP、掉幀或觀眾端
+影音，因此 Phase 5 通過也不能宣稱直播穩定性已驗收。
 
 目前只對 `channel.chat.message` 內可辨識的訊息類型做優先權排序；訂閱、Raid 與 Channel
 Points 等額外 EventSub 訂閱仍屬 Phase 7。`emotion_actions` 預設為空，因為目前沒有經
@@ -361,6 +392,25 @@ LLM 明確選出的白名單 action 優先於情緒對應動作；沒有核准�
 
 完整設計、降級行為與驗收方式見
 [`docs/phase-5-orchestration.md`](docs/phase-5-orchestration.md)。
+
+## Phase 5、6、7 驗收邊界
+
+- **Phase 5：核心互動鏈路。** 在測試頻道讓 Twitch → LLM → VTS → TTS → Twitch
+  回覆至少連續運作一小時；VTube Studio、實體播放與本機資源量測都要參與，但不啟動
+  OBS 或直播。
+- **Phase 6：真正的直播穩定性。** 操作者手動啟動 OBS，以預定直播的解析度、FPS、
+  編碼器與 bitrate 擷取 VTS、TTS 音訊及字幕；先完成本機錄影，再於使用者明確授權後
+  進行受控 Twitch 直播與 4～8 小時 soak test，檢查掉幀、bitrate、重連與觀眾端影音。
+- **Phase 7：品質與自動化。** 再加入 obs-websocket 場景／字幕自動化、額外 EventSub、
+  高品質語音、viseme 與獨立 bot 帳號。
+
+所以，Phase 5 的一小時測試可以回答「AI 互動管線能否長時間工作」；只有 Phase 6
+包含 OBS 的完整驗收，才能回答「實際直播是否穩定」。
+
+Phase 文件負責輪數、時數、執行順序、指標門檻與完成狀態；repo skill 只保存跨階段可
+重用的安全操作、診斷與量測方法。現有核心管線與 Twitch skill 分別為
+`$operate-ai-vtuber-orchestration`、`$operate-ai-vtuber-twitch`，不另外建立綁定 Phase
+編號或驗收時數的 skill。
 
 ## 測試
 

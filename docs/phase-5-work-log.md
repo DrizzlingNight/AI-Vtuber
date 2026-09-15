@@ -1,15 +1,94 @@
 # Phase 5 重新執行紀錄
 
-更新日期：2026-09-07
+更新日期：2026-09-15
 
-**先看 [一頁式結論](phase-5-result.md)：一小時實機測試未開始；Phase 5 程式已於
-2026-09-14 合併並同步至 `main`。本文件其餘 Git 敘述保留當時的歷史狀態。**
+**先看 [一頁式結論](phase-5-result.md)：Phase 5 核心互動鏈路已於 2026-09-15 完成
+60／60 輪、至少一小時實機驗收；第二帳號驅動、預熱、收尾修正、文件與長期 skill
+重整已隨本次收尾提交同步至 `main`。
+本文件其餘 Git 敘述保留當時的歷史狀態。**
 
 ## 目前結論
 
-本輪已實際修改 33 個檔案，完成程式修正與 **162 個離線測例**。實機單輪及連續測試
-仍停在前置條件受阻：完整鏈路實際完成 **0 輪**，延遲、RAM、VRAM **未量測**，
-至少一小時驗收 **未完成**。不能宣告 Phase 5 全部完成。
+目前完整離線驗證為 **168 個測例通過**。實機單輪 1／1、連續 5／5 及正式一小時
+60／60 輪均已通過；一小時報告同時顯示 `phase5_hour_acceptance: passed`、
+`measurements_complete: true`、`input_driver_complete: true`，因此 Phase 5 核心互動鏈路
+已完成。這不包含 OBS、編碼、RTMP 或直播穩定性。
+
+### 2026-09-15 Phase 與 skill 責任重整
+
+- 淘汰以施工階段命名的 `$continue-ai-vtuber-phase5`，將仍會跨階段使用的核心管線操作、
+  取消收尾、故障隔離與量測規則移至 `$operate-ai-vtuber-orchestration`。
+- 將 `$diagnose-ai-vtuber-twitch` 更名並調整為 `$operate-ai-vtuber-twitch`；主帳號與外部
+  測試帳號的授權、DPAPI、EventSub、Helix 收發及真實聊天室副作用都由此 skill 管理。
+- 第二帳號是跨階段可重用的測試輸入來源；訊息內容、數量、速率、持續時間及通過門檻由
+  各 Phase 文件決定，不固定在 Twitch 或 orchestration skill。
+- Phase 5 的 60 輪／3,600 秒與 `phase5_hour_acceptance` 仍保留在本文件、架構文件及正式
+  報告，不自動套用到 Phase 6。Phase 6 的 OBS、錄影、受控直播與時數要求仍屬該階段規畫。
+- 未建立 Phase 6 專屬 skill；等實際施工產生可重用的 OBS 或串流操作流程後，再以不綁定
+  Phase 編號或驗收時數的單一職責 skill 保存。
+
+### 2026-09-15 實機驗收完成
+
+- 主 Twitch 帳號驗證為 `drizzlingnight`；獨立第二帳號驗證為 `amber0329`，兩者身分不同，
+  且都只有 `user:read:chat`／`user:write:chat`。沒有讀取或記錄 token 內容。
+- 第一次單輪實機測試因新啟動 server 的完整 prompt 冷快取使首 token 約 54.88 秒、決策
+  約 62.68 秒，超過 30 秒 TTL 而失敗。新增啟動前本機 LLM 預熱；預熱不訂閱或發送
+  Twitch 訊息，正式量測不混入預熱時間。
+- 第二次單輪測試發現訊息前綴「Phase 5 自動測試」會被角色提示依規則視為純測試訊息並
+  正確選擇 `ignore`。驅動器改用既有 110 組繁中資料中標註為 `reply` 的 60 句唯一自然
+  聊天訊息，不再用會觸發安全忽略的前綴。
+- 第三次單輪測試完成語音與 Twitch 回覆，但模型選擇尚無本機情緒映射的 `happy`，因此
+  VTS 如實回報 `ReactionError`。Phase 5 契約改為只開放 `neutral` 與已有
+  `emotion_actions` 映射的情緒；沒有猜測或覆寫 NightRain 資源。
+- 修正後單輪 1／1 及連續 5／5 通過，接著啟動 60 則分散 3,600 秒的正式驗收。
+- 正式報告 `.local/benchmarks/phase5-one-hour.json`：60／60 輪完成，總時間
+  3,616.69 秒，所有輪次皆為 `completed`，錯誤數 0；佇列沒有 cooldown、滿載、過期、
+  驅逐或關閉丟棄。
+- 延遲 p50／p95：首 token 1.66／1.83 秒、完整決策 11.75／15.46 秒、開始發聲
+  11.93／15.65 秒、播放完成 16.75／20.30 秒。
+- 資源：system RAM peak 33,425.55 MiB、llama-server RSS peak 8,597.16 MiB、GPU VRAM
+  peak 7,646 MiB、GPU utilization peak 52%；VTS 6,140／6,140 次探測在線。
+- 修正前的三份失敗 JSON／Markdown 已各自封存；正式單輪、連續與一小時報告使用獨立
+  固定路徑。失敗證據沒有刪除或改寫。
+- 完整離線驗證更新為 **168 passed**，`compileall`、`pip check`、`git diff --check`
+  全數通過。
+
+### 2026-09-14 階段邊界校正
+
+- Phase 5 的一小時測試正式定義為「核心互動鏈路實機驗收」：包含真實 Twitch、LLM、
+  VTS、TTS、實體播放、Twitch 回覆與本機資源量測，但不啟動 OBS 或直播。
+- 因此 Phase 5 不會產生編碼、RTMP、掉幀、bitrate 或觀眾端影音證據，也不能用來宣稱
+  直播穩定性通過。
+- Phase 6 改為直播安全、最小 OBS 整合與直播穩定性驗收：先做 OBS 本機錄影，再經
+  使用者明確授權進行受控直播與 4～8 小時 soak test。Phase 7 再做 obs-websocket
+  自動化、額外事件與品質升級。
+- 本次只校正文件與 Codex skill，沒有啟動 OBS、Twitch 收發、模型、語音或實機驗收；
+  原有 blocked 報告與 0 輪結果維持不變。
+
+### 2026-09-14 第二帳號自動驅動校正
+
+使用者指出，若 60 則測試訊息都由操作者手動按 Enter，只能算人工輔助驗收，不能形成
+可重跑的自動測試。因此本輪補上與正式主帳號分離的 Phase 5 輸入驅動器：
+
+- 新增 `twitch-test-sender-auth` 與 `twitch-test-sender-validate`，第二帳號 token 使用
+  Windows DPAPI 保存至 `.local/secrets/twitch-test-sender-token.bin`，不覆蓋
+  `drizzlingnight` 的主帳號授權。
+- `phase5-smoke --auto-drive` 只接受該第二帳號的 EventSub 訊息；其他聊天室使用者不進入
+  驗收佇列。固定測試句不含私人資料，且每一則等待上一輪留下結果後才繼續。
+- `--drive-duration 3600` 將 60 則訊息從第一則到最後一則分散一小時；正式
+  `phase5_hour_acceptance` 現在要求至少 60 輪及 `input_driver_complete: true`。
+- 人工第二帳號模式仍可用於互動診斷，但不能讓正式一小時驗收通過。
+- 報告增加輸入驅動模式、第二帳號登入名稱、要求／已送訊息數與分散時間；不保存聊天室
+  全文、OAuth token 或 DPAPI 內容。
+
+本輪先安全停止原本等待人工訊息的單輪程序；它已建立 EventSub 訂閱，但沒有收到或送出
+聊天訊息、完成 0 輪，也沒有產生成功報告。VTube Studio 實際盤點為 NightRain 且
+`missing_resources` 為空；主 Twitch 授權實際驗證為 `drizzlingnight`；llama-server 已在
+loopback 載入並通過模型 SHA-256 驗證。這是授權前的歷史快照；第二帳號之後已完成授權，
+最新實機結果見上方「2026-09-15 實機驗收完成」。
+
+自動驅動器初版的完整離線驗證為 **167 個測例通過**；後續實機修正增加為 168 個。
+離線證據仍不替代上方另行保存的實機報告。
 
 所有原始碼與本紀錄保存在 `claireke0329-phase-5-orchestration` 分支，未自動套用至
 `F:\user\Documents\Workspace\AI Vtuber`、未合併 `main`、未推送或公開直播。

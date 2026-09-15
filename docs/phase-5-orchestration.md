@@ -1,6 +1,6 @@
 # Phase 5 AI VTuber 整合
 
-更新日期：2026-09-07
+更新日期：2026-09-15
 
 ## 狀態與範圍
 
@@ -10,7 +10,8 @@
 本階段沿用既有 Twitch Device Code Grant／DPAPI／EventSub／Helix、
 Gemma 4 12B／llama.cpp、VTS client／inventory／ActionExecutor，以及
 eSpeak NG／PCM／WAV／PortAudio／字幕與 MouthOpen 播放佇列。
-未加入 OBS、Phase 6 記憶或內容過濾，也未加入 Phase 7 語音模型或 viseme。
+未加入 OBS 或直播輸出，也未加入 Phase 6 的內容過濾、記憶、監控與重連策略；
+Phase 7 的語音模型、viseme、額外事件與 obs-websocket 自動化同樣不在本階段。
 
 MeloTTS 中文 checkpoint 的 speaker、訓練資料及聲音權利尚未證實，維持不下載、
 不啟用。eSpeak NG `cmn` 仍為既有 CPU 規則式合成基線。
@@ -37,6 +38,11 @@ Twitch EventSub 接收到外部訊息
 
 `thinking` 等狀態名稱是程式識別字；命令日誌另外保存繁體中文狀態說明。
 TTS 合成期間尚未進入 `speaking`，因為此時並未出聲。
+
+正式命令在建立 EventSub 訂閱前，會先以不送往 Twitch 或 VTS 的固定本機訊息完成一次
+結構化 LLM 預熱，避免新啟動 server 的首次 prompt evaluation 超過 30 秒 TTL。Phase 5
+契約只開放 `neutral` 與已有 `emotion_actions` 本機映射的情緒；未映射情緒不會先讓模型
+產生、再於 VTS 階段降級。
 
 ## 二、訊息佇列
 
@@ -134,6 +140,17 @@ orchestration:
 授權與 runtime，再啟動既有 `llm-serve`，保持 VTS 與 NightRain 開啟。
 不能拿範例映射假裝成實際 NightRain 校正，也不能用假 token 越過前置檢查。
 
+正式 smoke 另用第二個 Twitch 帳號作為自動輸入驅動器。先在使用者可見的終端完成一次
+官方 Device Code Grant；授權以 DPAPI 獨立保存，不覆蓋主頻道 token：
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_vtuber twitch-test-sender-auth
+.\.venv\Scripts\python.exe -m ai_vtuber twitch-test-sender-validate
+```
+
+第二帳號必須與主頻道帳號不同。自動模式只接受這個帳號的 EventSub 訊息，其他聊天室
+訊息不進入驗收佇列；這不是 Phase 7 的正式 bot 帳號，也不增加 Twitch scope。
+
 持續運行：
 
 ```powershell
@@ -145,26 +162,32 @@ orchestration:
 
 ```powershell
 .\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
-  --test-channel "已授權的測試頻道登入名稱" --messages 1 --timeout 600
+  --test-channel "已授權的測試頻道登入名稱" --messages 1 --timeout 600 `
+  --auto-drive
 ```
 
 連續短測試：
 
 ```powershell
 .\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
-  --test-channel "已授權的測試頻道登入名稱" --messages 5 --timeout 900
+  --test-channel "已授權的測試頻道登入名稱" --messages 5 --timeout 900 `
+  --auto-drive
 ```
 
 至少一小時驗收可使用較多輪次並把測試訊息分散在整個期間：
 
 ```powershell
 .\.venv\Scripts\python.exe -m ai_vtuber phase5-smoke `
-  --test-channel "已授權的測試頻道登入名稱" --messages 60 --timeout 4200
+  --test-channel "已授權的測試頻道登入名稱" --messages 60 --timeout 4200 `
+  --auto-drive --drive-duration 3600
 ```
 
-此命令不是自動發訊器。由另一個帳號在測試聊天室分批發訊，必須確認實際運行已達
-3600 秒且完整鏈路通過，才有一小時驗收證據。若 60 輪很快完成，仍只算短測試。
-Phase 6 的 4 至 8 小時 soak test 不在本階段執行。
+`--auto-drive` 只會由獨立第二帳號送出固定、可辨識且不含私人資料的安全測試句；每一則
+必須等上一輪留下結果後才繼續。一小時模式從第一則到最後一則分散 3600 秒，最後一輪
+完成時整體執行時間會超過一小時。人工發訊模式只供互動診斷，不能讓
+`phase5_hour_acceptance` 通過。
+這是一小時核心互動鏈路實機驗收：不啟動 OBS，不量測編碼、RTMP、掉幀或觀眾端影音。
+Phase 6 才會在最小 OBS 整合與直播輸出參與下執行 4 至 8 小時 soak test。
 
 `--test-channel` 必須與現有授權身份相同，不符合則拒絕訂閱與發送。Twitch 關台後的
 聊天室仍可能公開可見；程式不會把它變成私人聊天室。沒有 OBS、自動開播或主動測試開場
@@ -197,7 +220,8 @@ JSON 保留機器可讀欄位；Markdown 用繁體中文記錄限制、結果、
 嘴型未降級、必要量測完整且時間順序有效，才回傳通過。合法的 ignore 或 react_only
 另有離線測試，不能拿沒有出聲的結果冒充本項完整鏈路成功。
 
-`phase5_hour_acceptance` 另外要求至少兩輪、完整鏈路通過、實際運行至少 3600 秒。
+`phase5_hour_acceptance` 另外要求至少 60 輪、第二帳號自動驅動紀錄完整、完整鏈路通過、
+實際運行至少 3600 秒。
 缺少條件一律標示尚未完成；成功的短 smoke 不會把整個 Phase 5 標為完成。
 
 長駐 `run` 只保留最近 100 輪結果及 256 筆狀態轉移；smoke 限制最多 1000 輪及
@@ -205,7 +229,8 @@ JSON 保留機器可讀欄位；Markdown 用繁體中文記錄限制、結果、
 
 ## 八、安全資料界線與離線證據
 
-OAuth access token、refresh token、DPAPI 儲存內容及 llama-server API key 不會進入
+主帳號與第二測試帳號的 OAuth access token、refresh token、DPAPI 儲存內容及
+llama-server API key 不會進入
 模型提示、benchmark 或繁體中文紀錄。報告只保存錯誤類型，不保存外部服務的原始診斷或
 被拒絕的模型輸出；報告路徑也不能覆蓋設定、盤點、執行狀態或授權檔。
 

@@ -85,6 +85,7 @@ class EventSubClient:
         helix: TwitchHelixClient,
         message_queue: ChatMessageSink,
         *,
+        accepted_chatter_user_id: str | None = None,
         connection_factory: ConnectionFactory = open_eventsub_websocket,
         sleep: Sleep = asyncio.sleep,
         logger: logging.Logger | None = None,
@@ -93,6 +94,7 @@ class EventSubClient:
         self.auth = auth
         self.helix = helix
         self.message_queue = message_queue
+        self.accepted_chatter_user_id = accepted_chatter_user_id
         self.connection_factory = connection_factory
         self.sleep = sleep
         self.logger = logger or logging.getLogger("ai_vtuber.twitch.eventsub")
@@ -510,6 +512,18 @@ class EventSubClient:
                 logging.DEBUG,
                 "twitch_chat_message_ignored",
                 reason="self_message",
+                message_id=message.message_id,
+            )
+            return
+        if (
+            self.accepted_chatter_user_id is not None
+            and message.chatter_user_id != self.accepted_chatter_user_id
+        ):
+            log_event(
+                self.logger,
+                logging.DEBUG,
+                "twitch_chat_message_ignored",
+                reason="unexpected_test_sender",
                 message_id=message.message_id,
             )
             return

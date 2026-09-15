@@ -8,7 +8,7 @@ import os
 import socket
 import sys
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -113,6 +113,71 @@ from ai_vtuber.vts.talk_demo import TalkDemoExecutor
 DEFAULT_CONFIG = Path("config/app.yaml")
 Result = TypeVar("Result")
 
+_PHASE5_DRIVER_PROMPTS = (
+    "晚上好～今天過得怎麼樣？",
+    "妳今天看起來心情很好耶",
+    "剛下班，好想直接躺平喔",
+    "晚餐吃滷肉飯還是牛肉麵比較好？",
+    "外面雨超大，妳那邊也有下嗎？",
+    "今天上班一直出包，快被自己氣死",
+    "可以講一個不太冷的冷笑話嗎？",
+    "妳比較喜歡貓派還是狗派？",
+    "週末完全不想出門，這樣正常嗎",
+    "今天第一次來，這裡平常都在聊什麼呀？",
+    "早餐店奶茶是不是都有一種神祕魔力",
+    "我剛剛把泡麵打翻了，人生好難",
+    "如果明天突然放假，妳第一件事會做什麼？",
+    "最近有沒有讓妳印象很深的歌？",
+    "我今天終於把拖很久的事情做完了！",
+    "好睏但又捨不得睡，救命",
+    "妳覺得珍珠奶茶要全糖還是微糖？",
+    "捷運剛剛坐過站，我真的笑死",
+    "今天的雲長得很像一隻胖胖的鯨魚",
+    "可以陪我一起倒數下班嗎？",
+    "妳會怕蟑螂嗎？我剛剛差點搬家",
+    "我媽又問我什麼時候交男朋友了啦",
+    "今天買東西剛好遇到特價，賺爛了",
+    "颱風天最適合在家煮火鍋對吧",
+    "妳講話可以再更台一點嗎哈哈",
+    "我只是想來這裡安靜聽妳聊天",
+    "剛剛那個反應也太真實了吧",
+    "今天有點低落，但也說不上來為什麼",
+    "我明天要面試，現在緊張到睡不著",
+    "考試終於結束了，我自由啦！",
+    "妳知道「是在哈囉」現在還有人講嗎？",
+    "我朋友放我鴿子，現在一個人吃飯",
+    "幫我選：鹽酥雞要不要加九層塔？",
+    "剛洗好的衣服又被雨淋濕，真的會謝",
+    "妳覺得熬夜追劇值得嗎？",
+    "今天被陌生人幫了一個忙，心情很好",
+    "我家的貓剛剛踩到鍵盤把作業關掉了",
+    "這個月又要吃土了，有沒有省錢妙招？",
+    "妳最不能接受披薩上放什麼？",
+    "先不管正事，我們來聊點廢話吧",
+    "假裝妳剛偷吃了最後一塊蛋糕，被我抓到了",
+    "如果妳是咖啡店老闆，會推薦我喝什麼？",
+    "現在妳是偵探，猜猜我的宵夜藏在哪裡",
+    "用傲嬌一點的方式叫我早點睡",
+    "假裝我們正在颱風天的便利商店避雨",
+    "妳是隊長，我們等等要去討伐星期一",
+    "把我的拖延症當成一隻怪獸吐槽一下",
+    "如果聊天室是一艘船，妳會怎麼歡迎新船員？",
+    "演一下發現冰箱裡的布丁不見了",
+    "請用很有戲的方式宣布等等要休息五分鐘",
+    "假裝這場直播是深夜電台，跟失眠的人說句話",
+    "如果妳會魔法，幫我把明天的鬧鐘變不見",
+    "演一個嘴上說不怕其實很怕打雷的人",
+    "把今天的壞心情想像成垃圾，陪我丟掉它",
+    "妳是夜市攤販，努力推銷最後一份雞排給我",
+    "剛進來，請問今天的主題是什麼？",
+    "可以跟剛進來的大家說聲歡迎嗎？",
+    "今天會開到幾點呀？",
+    "有人可以告訴我剛剛發生什麼事嗎？",
+    "晚安先睡了，明天還要早起上班",
+)
+
+_PHASE5_WARMUP_MESSAGE = "Phase 5 啟動前本機預熱：請用一句簡短繁體中文打招呼。"
+
 
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -171,6 +236,9 @@ def health_report(config: LoadedAppConfig) -> dict[str, object]:
         "twitch": {
             "client_id_configured": config.twitch_client_id is not None,
             "token_present": config.twitch_token_path.exists(),
+            "test_sender_token_present": (
+                config.twitch_test_sender_token_path.exists()
+            ),
             "token_storage": "windows_dpapi",
             "scopes": list(config.data.twitch.scopes),
         },
@@ -262,12 +330,16 @@ def _twitch_authorization_notice(authorization: DeviceAuthorization) -> None:
 def _build_twitch_clients(
     config: LoadedAppConfig,
     http_client: httpx.AsyncClient,
+    *,
+    token_path: Path | None = None,
 ) -> tuple[TwitchAuth, TwitchHelixClient]:
     client_id = config.require_twitch_client_id()
     auth = TwitchAuth(
         config.data.twitch,
         client_id,
-        TwitchTokenStore(config.twitch_token_path),
+        TwitchTokenStore(
+            config.twitch_token_path if token_path is None else token_path
+        ),
         http_client,
     )
     helix = TwitchHelixClient(
@@ -305,11 +377,23 @@ async def _await_while_eventsub_runs(
             await asyncio.gather(operation_task, return_exceptions=True)
 
 
-async def _twitch_auth_command(config: LoadedAppConfig) -> int:
+async def _twitch_auth_command(
+    config: LoadedAppConfig,
+    *,
+    token_path: Path | None = None,
+    authorization_role: str = "primary",
+) -> int:
+    resolved_token_path = (
+        config.twitch_token_path if token_path is None else token_path
+    )
     async with httpx.AsyncClient(
         timeout=config.data.twitch.request_timeout_seconds
     ) as http_client:
-        auth, _ = _build_twitch_clients(config, http_client)
+        auth, _ = _build_twitch_clients(
+            config,
+            http_client,
+            token_path=resolved_token_path,
+        )
         identity = await auth.authorize_device(_twitch_authorization_notice)
     _print_json(
         {
@@ -318,22 +402,36 @@ async def _twitch_auth_command(config: LoadedAppConfig) -> int:
             "user_id": identity.user_id,
             "scopes": list(identity.scopes),
             "expires_in_seconds": identity.expires_in,
-            "token_store": str(config.twitch_token_path),
+            "authorization_role": authorization_role,
+            "token_store": str(resolved_token_path),
             "token_storage": "windows_dpapi",
         }
     )
     return 0
 
 
-async def _twitch_validate_command(config: LoadedAppConfig) -> int:
+async def _twitch_validate_command(
+    config: LoadedAppConfig,
+    *,
+    token_path: Path | None = None,
+    authorization_role: str = "primary",
+) -> int:
+    resolved_token_path = (
+        config.twitch_token_path if token_path is None else token_path
+    )
     async with httpx.AsyncClient(
         timeout=config.data.twitch.request_timeout_seconds
     ) as http_client:
-        auth, _ = _build_twitch_clients(config, http_client)
+        auth, _ = _build_twitch_clients(
+            config,
+            http_client,
+            token_path=resolved_token_path,
+        )
         session = await auth.get_session(force_validate=True)
     _print_json(
         {
             "status": "valid",
+            "authorization_role": authorization_role,
             "login": session.identity.login,
             "user_id": session.identity.user_id,
             "scopes": list(session.identity.scopes),
@@ -390,6 +488,20 @@ def _build_llm_contract(config: LoadedAppConfig) -> LLMOutputContract:
         )
     except ValueError as error:
         raise ConfigError(f"Invalid LLM whitelist: {error}") from error
+
+
+def _phase5_allowed_emotions(config: LoadedAppConfig) -> tuple[str, ...]:
+    mapped_emotions = config.data.orchestration.emotion_actions
+    allowed = tuple(
+        emotion
+        for emotion in config.data.llm.allowed_emotions
+        if emotion == "neutral" or emotion in mapped_emotions
+    )
+    if not allowed:
+        raise ConfigError(
+            "Phase 5 至少需要 neutral 或一個已有本機 VTS 映射的情緒"
+        )
+    return allowed
 
 
 def _build_llm_prompt(
@@ -1091,30 +1203,100 @@ async def _wait_for_phase5_completion(
     *,
     max_messages: int,
     timeout_seconds: float | None,
+    input_driver: Awaitable[None] | None = None,
 ) -> tuple[tuple[TurnResult, ...], bool]:
     orchestration_runner = asyncio.create_task(
         orchestrator.run(max_turns=max_messages)
     )
+    driver_runner = (
+        asyncio.create_task(input_driver) if input_driver is not None else None
+    )
+    loop = asyncio.get_running_loop()
+    deadline = (
+        None if timeout_seconds is None else loop.time() + timeout_seconds
+    )
     timed_out = False
     try:
-        done, _ = await asyncio.wait(
-            {orchestration_runner, eventsub_runner},
-            timeout=timeout_seconds,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if not done:
-            timed_out = True
-            orchestration_runner.cancel()
-            await asyncio.gather(orchestration_runner, return_exceptions=True)
-            return tuple(orchestrator.results), timed_out
-        if orchestration_runner in done:
-            return orchestration_runner.result(), timed_out
-        eventsub_runner.result()
-        raise TwitchNetworkError("Twitch EventSub stopped unexpectedly")
+        while True:
+            waiting: set[asyncio.Task[object]] = {
+                orchestration_runner,
+                eventsub_runner,
+            }
+            if driver_runner is not None:
+                waiting.add(driver_runner)
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - loop.time())
+            )
+            done, _ = await asyncio.wait(
+                waiting,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                timed_out = True
+                return tuple(orchestrator.results), timed_out
+            if driver_runner is not None and driver_runner in done:
+                driver_runner.result()
+                driver_runner = None
+                continue
+            if orchestration_runner in done:
+                return orchestration_runner.result(), timed_out
+            eventsub_runner.result()
+            raise TwitchNetworkError("Twitch EventSub stopped unexpectedly")
     finally:
         if not orchestration_runner.done():
             orchestration_runner.cancel()
             await asyncio.gather(orchestration_runner, return_exceptions=True)
+        if driver_runner is not None and not driver_runner.done():
+            driver_runner.cancel()
+            await asyncio.gather(driver_runner, return_exceptions=True)
+
+
+def _phase5_driver_message(sequence: int) -> str:
+    if not 1 <= sequence <= len(_PHASE5_DRIVER_PROMPTS):
+        raise ValueError(
+            "Phase 5 driver sequence must select one fixed natural-chat prompt"
+        )
+    return _PHASE5_DRIVER_PROMPTS[sequence - 1]
+
+
+async def _drive_phase5_messages(
+    helix: TwitchHelixClient,
+    orchestrator: AIVTuberOrchestrator,
+    *,
+    broadcaster_user_id: str,
+    sender_user_id: str,
+    message_count: int,
+    duration_seconds: float,
+    state: dict[str, object],
+    initial_delay_seconds: float = 1.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.perf_counter,
+) -> None:
+    if message_count < 1:
+        raise ValueError("Phase 5 driver requires at least one message")
+    if duration_seconds < 0 or not math.isfinite(duration_seconds):
+        raise ValueError("Phase 5 driver duration must be finite and non-negative")
+    if initial_delay_seconds > 0:
+        await sleep(initial_delay_seconds)
+    started_at = clock()
+    for index in range(message_count):
+        if index > 0:
+            while len(orchestrator.results) < index:
+                await sleep(0.1)
+            if duration_seconds > 0:
+                target = started_at + duration_seconds * index / (message_count - 1)
+                remaining = target - clock()
+                if remaining > 0:
+                    await sleep(remaining)
+        await helix.send_chat_message(
+            _phase5_driver_message(index + 1),
+            broadcaster_user_id=broadcaster_user_id,
+            sender_user_id=sender_user_id,
+        )
+        state["sent_messages"] = index + 1
 
 
 def _phase5_missing_prerequisites(config: LoadedAppConfig) -> list[str]:
@@ -1161,6 +1343,8 @@ async def _phase5_command(
     output_path: Path | None,
     server_pid: int | None,
     test_channel: str | None = None,
+    auto_drive: bool = False,
+    drive_duration_seconds: float = 0.0,
 ) -> int:
     if max_messages < 0:
         raise ConfigError("--max-messages 不得小於零")
@@ -1176,6 +1360,28 @@ async def _phase5_command(
         raise ConfigError("--timeout 必須介於零至 7200 秒之間且不含零")
     if server_pid is not None and server_pid <= 0:
         raise ConfigError("--server-pid 必須大於零")
+    if auto_drive and not smoke_mode:
+        raise ConfigError("自動測試發送器只允許搭配 phase5-smoke")
+    if auto_drive and max_messages > len(_PHASE5_DRIVER_PROMPTS):
+        raise ConfigError("自動測試發送器最多支援 60 則固定自然聊天室訊息")
+    if not math.isfinite(drive_duration_seconds) or not (
+        0 <= drive_duration_seconds <= 3_600
+    ):
+        raise ConfigError("--drive-duration 必須介於 0 至 3600 秒")
+    if not auto_drive and drive_duration_seconds != 0:
+        raise ConfigError("--drive-duration 必須搭配 --auto-drive")
+    if max_messages == 1 and drive_duration_seconds != 0:
+        raise ConfigError("單輪自動測試的 --drive-duration 必須為 0")
+    if (
+        smoke_timeout_seconds is not None
+        and drive_duration_seconds >= smoke_timeout_seconds
+    ):
+        raise ConfigError("--drive-duration 必須小於 --timeout，保留最後一輪處理時間")
+    if auto_drive and (
+        config.twitch_test_sender_token_path.resolve()
+        == config.twitch_token_path.resolve()
+    ):
+        raise ConfigError("第二帳號授權檔必須與主 Twitch 授權檔分離")
     resolved_output = (
         default_phase5_report_path(config.llm_benchmarks_path)
         if output_path is None else config.resolve(output_path)
@@ -1186,13 +1392,18 @@ async def _phase5_command(
         path.resolve() for path in (
             config.source, config.actions_path, config.inventory_path,
             config.token_path, config.twitch_token_path, config.llm_api_key_path,
-            config.llm_server_state_path,
+            config.twitch_test_sender_token_path, config.llm_server_state_path,
         )
     }:
         raise ConfigError("實機報告不得覆蓋設定、盤點、執行狀態或授權檔")
     channel = test_channel.strip().casefold() if test_channel is not None else None
     if smoke_mode:
         missing = _phase5_missing_prerequisites(config)
+        if auto_drive and not config.twitch_test_sender_token_path.is_file():
+            missing.append(
+                "未找到第二帳號 DPAPI 授權檔："
+                f"{config.twitch_test_sender_token_path}"
+            )
         if not channel:
             missing.append("尚未指定測試頻道：請使用 --test-channel 明確指定已授權的頻道登入名稱。")
         if missing:
@@ -1202,6 +1413,15 @@ async def _phase5_command(
                 llm_settings=config.data.llm,
                 tts_settings=config.data.tts,
             )
+            report["input_driver"] = {
+                "mode": (
+                    "automated_twitch_test_account"
+                    if auto_drive else "manual_second_account"
+                ),
+                "requested_messages": max_messages,
+                "sent_messages": 0 if auto_drive else None,
+                "duration_seconds": drive_duration_seconds,
+            }
             write_phase5_report(resolved_output, report)
             _print_json({
                 "status": "blocked",
@@ -1215,7 +1435,14 @@ async def _phase5_command(
         raise ConfigError("請以 --test-channel 明確指定測試頻道，避免誤用正式聊天室")
 
     actions = load_actions_config(config.actions_path)
-    contract = _build_llm_contract(config)
+    try:
+        contract = LLMOutputContract.from_action_config(
+            allowed_emotions=_phase5_allowed_emotions(config),
+            allowed_actions=config.data.llm.allowed_actions,
+            actions_config=actions,
+        )
+    except ValueError as error:
+        raise ConfigError(f"Invalid Phase 5 LLM whitelist: {error}") from error
     prompt = _build_llm_prompt(config, contract)
     orchestration = config.data.orchestration
     incoming = BoundedPriorityChatQueue(
@@ -1235,7 +1462,7 @@ async def _phase5_command(
         reactions = VTSReactionRuntime(
             executor,
             actions,
-            allowed_emotions=config.data.llm.allowed_emotions,
+            allowed_emotions=contract.allowed_emotions,
             allowed_actions=contract.allowed_actions,
             emotion_actions=orchestration.emotion_actions,
             cleanup_timeout_seconds=orchestration.cleanup_timeout_seconds,
@@ -1278,6 +1505,15 @@ async def _phase5_command(
     started_at: float | None = None
     failure_types: list[str] = []
     cancelled = False
+    driver_state: dict[str, object] = {
+        "mode": (
+            "automated_twitch_test_account"
+            if auto_drive else "manual_second_account"
+        ),
+        "requested_messages": max_messages,
+        "sent_messages": 0 if auto_drive else None,
+        "duration_seconds": drive_duration_seconds,
+    }
     try:
         async with AsyncExitStack() as stack:
             http_client = await stack.enter_async_context(
@@ -1290,9 +1526,42 @@ async def _phase5_command(
             twitch_session = await auth.get_session()
             if twitch_session.identity.login.casefold() != channel:
                 raise ConfigError("指定測試頻道與目前 Twitch 授權身份不同；未建立訂閱或發送訊息")
+            driver_helix: TwitchHelixClient | None = None
+            driver_session = None
+            if auto_drive:
+                driver_auth, driver_helix = _build_twitch_clients(
+                    config,
+                    http_client,
+                    token_path=config.twitch_test_sender_token_path,
+                )
+                driver_session = await driver_auth.get_session(force_validate=True)
+                if driver_session.identity.user_id == twitch_session.identity.user_id:
+                    raise ConfigError("第二帳號測試發送器不得與主 Twitch 授權身份相同")
+                driver_state["login"] = driver_session.identity.login
             llm = _build_llm_client(config, http_client)
+            await llm.health()
+            _print_json(
+                {
+                    "status": "warming_up",
+                    "mode": "phase5_smoke" if smoke_mode else "run",
+                    "description": "正在預熱本機 LLM；尚未訂閱或發送 Twitch 訊息。",
+                    "automatic_broadcast": False,
+                }
+            )
+            warmup = await llm.generate(
+                _PHASE5_WARMUP_MESSAGE,
+                system_prompt=prompt,
+                contract=contract,
+            )
+            _print_json(
+                {
+                    "status": "warmup_complete",
+                    "metrics": asdict(warmup.metrics),
+                    "twitch_message_sent": False,
+                    "automatic_broadcast": False,
+                }
+            )
             if smoke_mode:
-                await llm.health()
                 await vts_client.connect()
                 inventory = await service.refresh_inventory()
                 if inventory.model.model_id != actions.model_id:
@@ -1322,12 +1591,21 @@ async def _phase5_command(
                 ),
                 state_history_size=max_messages * 6 + 3 if smoke_mode else 256,
             )
-            eventsub = EventSubClient(
-                config.data.twitch,
-                auth,
-                helix,
-                incoming,
-            )
+            if driver_session is None:
+                eventsub = EventSubClient(
+                    config.data.twitch,
+                    auth,
+                    helix,
+                    incoming,
+                )
+            else:
+                eventsub = EventSubClient(
+                    config.data.twitch,
+                    auth,
+                    helix,
+                    incoming,
+                    accepted_chatter_user_id=driver_session.identity.user_id,
+                )
             eventsub_runner = asyncio.create_task(eventsub.run())
             stack.push_async_callback(
                 _close_phase5_eventsub, eventsub, eventsub_runner
@@ -1345,6 +1623,7 @@ async def _phase5_command(
                     "description": "已就緒，等待另一個帳號送入測試聊天室訊息；不會自動開播。",
                     "subscription_id": eventsub.subscription_id,
                     "message_limit": max_messages,
+                    "input_driver": dict(driver_state),
                     "automatic_broadcast": False,
                 }
             )
@@ -1362,11 +1641,25 @@ async def _phase5_command(
                     vts_probe=lambda: _vts_online(config.data.vts.url),
                 )
                 async with resources:
+                    input_driver = (
+                        _drive_phase5_messages(
+                            driver_helix,
+                            orchestrator,
+                            broadcaster_user_id=twitch_session.identity.user_id,
+                            sender_user_id=driver_session.identity.user_id,
+                            message_count=max_messages,
+                            duration_seconds=drive_duration_seconds,
+                            state=driver_state,
+                        )
+                        if driver_helix is not None and driver_session is not None
+                        else None
+                    )
                     results, timed_out = await _wait_for_phase5_completion(
                         orchestrator,
                         eventsub_runner,
                         max_messages=max_messages,
                         timeout_seconds=smoke_timeout_seconds,
+                        input_driver=input_driver,
                     )
                 resource_summary = resources.summary()
             else:
@@ -1385,6 +1678,7 @@ async def _phase5_command(
         ConfigError,
         TwitchError,
         LLMError,
+        LLMOutputRejected,
         ActionMappingError,
         VTSConnectionError,
         VTSAuthenticationError,
@@ -1407,6 +1701,13 @@ async def _phase5_command(
             resource_summary = resources.summary()
         if orchestrator is not None:
             results = orchestrator.results
+        if (
+            auto_drive
+            and not timed_out
+            and driver_state["sent_messages"] != max_messages
+            and "Phase5InputDriverIncomplete" not in failure_types
+        ):
+            failure_types.append("Phase5InputDriverIncomplete")
         if resource_summary is None:
             report = build_blocked_report(
                 requested_turns=max_messages,
@@ -1434,7 +1735,10 @@ async def _phase5_command(
                 transitions=(
                     tuple(orchestrator.state.history) if orchestrator is not None else ()
                 ),
+                input_driver=driver_state,
             )
+        if report.get("input_driver") is None:
+            report["input_driver"] = dict(driver_state)
         write_phase5_report(resolved_output, report)
         _print_json(
             {
@@ -1445,6 +1749,7 @@ async def _phase5_command(
                 "summary": report["summary"],
                 "queue": report.get("queue"),
                 "resources": report["resources"],
+                "input_driver": report["input_driver"],
                 "automatic_broadcast": False,
             }
         )
@@ -1511,6 +1816,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "twitch-validate",
         help="Validate Twitch tokens and report the granted scopes",
+    )
+    subparsers.add_parser(
+        "twitch-test-sender-auth",
+        help="Authorize the separate external test-sender account",
+    )
+    subparsers.add_parser(
+        "twitch-test-sender-validate",
+        help="Validate the separate external test-sender account",
     )
     twitch_listen = subparsers.add_parser(
         "twitch-listen",
@@ -1679,6 +1992,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-channel",
         help="明確指定測試頻道登入名稱；未指定時只保存受阻報告，不收發訊息",
     )
+    phase5_smoke.add_argument(
+        "--auto-drive",
+        action="store_true",
+        help="使用獨立授權的第二帳號，自動送出固定安全測試訊息",
+    )
+    phase5_smoke.add_argument(
+        "--drive-duration",
+        type=float,
+        default=0.0,
+        help="自動訊息從第一則到最後一則的分散秒數（最多 3600）",
+    )
     return parser
 
 
@@ -1717,6 +2041,22 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_twitch_auth_command(config))
         if args.command == "twitch-validate":
             return asyncio.run(_twitch_validate_command(config))
+        if args.command == "twitch-test-sender-auth":
+            return asyncio.run(
+                _twitch_auth_command(
+                    config,
+                    token_path=config.twitch_test_sender_token_path,
+                    authorization_role="test_sender",
+                )
+            )
+        if args.command == "twitch-test-sender-validate":
+            return asyncio.run(
+                _twitch_validate_command(
+                    config,
+                    token_path=config.twitch_test_sender_token_path,
+                    authorization_role="test_sender",
+                )
+            )
         if args.command == "twitch-listen":
             return asyncio.run(
                 _twitch_listen_command(
@@ -1805,6 +2145,8 @@ def main(argv: list[str] | None = None) -> int:
                     output_path=args.output,
                     server_pid=args.server_pid,
                     test_channel=args.test_channel,
+                    auto_drive=args.auto_drive,
+                    drive_duration_seconds=args.drive_duration,
                 )
             )
         raise AssertionError(f"Unhandled command: {args.command}")

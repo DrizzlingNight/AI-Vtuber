@@ -124,6 +124,9 @@ class TwitchSettings(StrictModel):
 class ProjectPaths(StrictModel):
     token: Path
     twitch_token: Path = Path(".local/secrets/twitch-token.bin")
+    twitch_test_sender_token: Path = Path(
+        ".local/secrets/twitch-test-sender-token.bin"
+    )
     llm_api_key: Path = Path(".local/secrets/llama-server-api-key.txt")
     inventory: Path
     actions: Path
@@ -510,6 +513,10 @@ class LoadedAppConfig:
     @property
     def twitch_token_path(self) -> Path:
         return self.resolve(self.data.paths.twitch_token)
+
+    @property
+    def twitch_test_sender_token_path(self) -> Path:
+        return self.resolve(self.data.paths.twitch_test_sender_token)
 
     @property
     def llm_api_key_path(self) -> Path:

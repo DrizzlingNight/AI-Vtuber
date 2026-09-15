@@ -287,6 +287,47 @@ async def test_unexpected_disconnect_reconnects_and_resubscribes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_accepts_only_configured_test_sender_when_filter_is_set() -> None:
+    connection = FakeConnection(
+        [
+            _welcome("session-filtered"),
+            _notification(
+                "delivery-intruder",
+                "chat-intruder",
+                "intruder",
+                "must be ignored",
+            ),
+            _notification(
+                "delivery-driver",
+                "chat-driver",
+                "test-driver",
+                "accepted test input",
+            ),
+        ]
+    )
+
+    async def factory(_: str, __: float) -> FakeConnection:
+        return connection
+
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=10)
+    client = EventSubClient(
+        TwitchSettings(),
+        FakeAuth(),  # type: ignore[arg-type]
+        FakeHelix(),  # type: ignore[arg-type]
+        queue,
+        accepted_chatter_user_id="test-driver",
+        connection_factory=factory,
+    )
+    runner = asyncio.create_task(client.run())
+
+    received = await asyncio.wait_for(queue.get(), timeout=1)
+    await _stop(client, runner)
+
+    assert received.message_id == "chat-driver"
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_hourly_validation_retries_transient_network_failure() -> None:
     recovered = asyncio.Event()
 

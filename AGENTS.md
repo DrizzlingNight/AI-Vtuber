@@ -2,10 +2,12 @@
 
 ## 接手入口
 
-- Phase 5 或後續施工前，先完整閱讀 `docs/phase-5-handoff-to-codex.md`，再閱讀
-  `docs/phase-5-result.md` 與目前任務直接相關的技術文件。
-- 涉及 Phase 5 orchestration、實機 smoke、一小時驗收或 Phase 5 完成判定時，
-  使用 repo skill `$continue-ai-vtuber-phase5`。
+- 接手前先閱讀 `PROJECT_BRIEF.md` 與目前任務直接相關的技術文件；重查 Phase 5 時再完整
+  閱讀 `docs/phase-5-handoff-to-codex.md`、`docs/phase-5-result.md` 與正式實機報告。
+- 核心 orchestration 的啟停、整合 smoke、取消收尾、故障隔離與量測使用 repo skill
+  `$operate-ai-vtuber-orchestration`。skill 只負責可重用操作方法，不定義 Phase 完成條件。
+- VTube Studio 資源校正、Twitch 帳號／收發操作與本地 LLM benchmark，分別使用
+  `$calibrate-ai-vtuber-vts`、`$operate-ai-vtuber-twitch`、`$benchmark-ai-vtuber-llm`。
 - 對使用者的狀態摘要、驗收報告與新增專案文件使用繁體中文；程式識別字與外部工具
   的原始欄位名稱保持原樣。
 
@@ -17,9 +19,13 @@
   本機狀態，不可強制加入 Git。
 - 目前只允許 eSpeak NG。MeloTTS 中文 checkpoint 或其他真人／角色聲音在使用者完成
   權利確認前不得下載、啟用或直播使用。
-- 離線測試通過不等於 Phase 5 實機驗收通過。只有正式報告同時滿足所有一小時條件，
-  才能將 Phase 5 標示為完成。
-- 除非使用者另行要求，不進入 Phase 6（OBS）或 Phase 7，也不重做已驗證的 Phase 1～4。
+- 離線測試通過不等於任何實機或直播驗收通過。Phase 專屬的輪數、時數、執行順序、
+  指標門檻與完成狀態只以 `PROJECT_BRIEF.md`、對應 Phase 文件及正式報告為準，不寫進
+  通用 skill，也不把某一 Phase 的標準自動套用到下一個 Phase。
+- 核心互動鏈路報告若沒有 OBS、編碼、RTMP、掉幀、bitrate 或觀眾端影音證據，就不能
+  宣稱直播穩定性通過。
+- 未經使用者針對當次操作明確授權，不啟動 OBS 推流或公開直播；也不提前加入尚未進入
+  範圍的後續 Phase 功能。
 
 ## 基本驗證
 

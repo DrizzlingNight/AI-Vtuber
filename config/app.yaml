@@ -88,6 +88,7 @@ orchestration:
 paths:
   token: .local/secrets/vts-token.json
   twitch_token: .local/secrets/twitch-token.bin
+  twitch_test_sender_token: .local/secrets/twitch-test-sender-token.bin
   llm_api_key: .local/secrets/llama-server-api-key.txt
   inventory: .local/state/vts-inventory.json
   actions: config/actions.local.yaml

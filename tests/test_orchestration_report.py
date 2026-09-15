@@ -109,6 +109,73 @@ def test_phase5_report_fails_when_mouth_sync_degrades() -> None:
     assert report["status"] == "failed"
 
 
+def test_hour_acceptance_requires_complete_automated_test_sender() -> None:
+    result = TurnResult(
+        message_id="message-1",
+        priority=MessagePriority.NORMAL,
+        status="completed",
+        decision="reply",
+        selected_action=None,
+        chat_sent=True,
+        speech_status="completed",
+        errors=(),
+        latency=TurnLatency(0.2, 0.8, 1.0, 2.0),
+    )
+    resources = ResourceSummary(
+        samples=2,
+        baseline_system_ram_used_mb=100,
+        peak_system_ram_used_mb=110,
+        system_ram_delta_mb=10,
+        baseline_gpu_vram_used_mb=200,
+        peak_gpu_vram_used_mb=210,
+        gpu_vram_delta_mb=10,
+        peak_server_rss_mb=50,
+        peak_gpu_utilization_percent=20,
+        vts_connectivity_samples=2,
+        vts_online_samples=2,
+        vts_online_throughout=True,
+    )
+    results = tuple(
+        replace(result, message_id=f"message-{index}")
+        for index in range(1, 61)
+    )
+    driver = {
+        "mode": "automated_twitch_test_account",
+        "requested_messages": 60,
+        "sent_messages": 60,
+        "duration_seconds": 3600,
+    }
+
+    automated = build_phase5_report(
+        results,
+        queue_stats=QueueStats(60, 0, 0, 0, 0, 0, 0),
+        resources=resources,
+        requested_turns=60,
+        timed_out=False,
+        elapsed_seconds=3600,
+        input_driver=driver,
+    )
+    manual = build_phase5_report(
+        results,
+        queue_stats=QueueStats(60, 0, 0, 0, 0, 0, 0),
+        resources=resources,
+        requested_turns=60,
+        timed_out=False,
+        elapsed_seconds=3600,
+        input_driver={
+            "mode": "manual_second_account",
+            "requested_messages": 60,
+            "sent_messages": None,
+            "duration_seconds": 3600,
+        },
+    )
+
+    assert automated["phase5_hour_acceptance"] == "passed"
+    assert automated["input_driver_complete"] is True
+    assert manual["phase5_hour_acceptance"] == "not_completed"
+    assert manual["input_driver_complete"] is False
+
+
 @pytest.mark.parametrize("missing", ["latency", "ram", "vram"])
 def test_missing_required_measurements_cannot_pass_smoke(missing: str) -> None:
     result = TurnResult(

@@ -31,6 +31,7 @@ def build_phase5_report(
     llm_settings: LLMSettings | None = None,
     tts_settings: TTSSettings | None = None,
     transitions: tuple[StateTransition, ...] = (),
+    input_driver: dict[str, object] | None = None,
 ) -> dict[str, object]:
     statuses = Counter(result.status for result in results)
     measurements_complete = bool(results) and all(
@@ -59,6 +60,12 @@ def build_phase5_report(
             for result in results
         )
     )
+    automated_input_complete = bool(
+        input_driver is not None
+        and input_driver.get("mode") == "automated_twitch_test_account"
+        and input_driver.get("requested_messages") == requested_turns
+        and input_driver.get("sent_messages") == requested_turns
+    )
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": "single_turn" if requested_turns == 1 else "continuous",
@@ -73,11 +80,14 @@ def build_phase5_report(
         "phase5_hour_acceptance": (
             "passed"
             if passed
-            and requested_turns >= 2
+            and requested_turns >= 60
             and elapsed_seconds is not None
             and elapsed_seconds >= 3600
+            and automated_input_complete
             else "not_completed"
         ),
+        "input_driver_complete": automated_input_complete,
+        "input_driver": input_driver,
         "measurements_complete": measurements_complete,
         "failure_types": list(failure_types),
         "description": (
@@ -324,9 +334,38 @@ def render_phase5_report(payload: dict[str, object]) -> str:
         "本命令不啟動 OBS 或直播；若已進入整合流程，安全文字回覆會送到明確指定的"
         "測試聊天室。Twitch 關台後的聊天室也可能公開可見。",
         "",
+        "## 測試輸入驅動",
+        "",
+        "| 模式 | 第二帳號 | 要求訊息 | 已送訊息 | 分散秒數 |",
+        "|---|---|---:|---:|---:|",
+    ]
+    input_driver = payload.get("input_driver")
+    if isinstance(input_driver, dict):
+        mode = {
+            "automated_twitch_test_account": "獨立第二帳號自動發送",
+            "manual_second_account": "第二帳號人工發送",
+        }.get(str(input_driver.get("mode")), str(input_driver.get("mode")))
+        lines.append(
+            "| "
+            + " | ".join(
+                _cell(value)
+                for value in (
+                    mode,
+                    input_driver.get("login") or "未記錄",
+                    input_driver.get("requested_messages"),
+                    input_driver.get("sent_messages"),
+                    input_driver.get("duration_seconds"),
+                )
+            )
+            + " |"
+        )
+    else:
+        lines.append("| 未記錄 | 未記錄 | 未量測 | 未量測 | 未量測 |")
+    lines.extend([
+        "",
         "## 前置限制或執行錯誤",
         "",
-    ]
+    ])
     blockers = payload.get("blockers")
     failure_types = payload.get("failure_types")
     issues = blockers if isinstance(blockers, list) else failure_types

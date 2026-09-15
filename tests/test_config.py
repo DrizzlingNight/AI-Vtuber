@@ -50,6 +50,9 @@ def test_load_app_config_resolves_project_paths(tmp_path: Path) -> None:
     assert loaded.twitch_token_path == (
         tmp_path / ".local/secrets/twitch-token.bin"
     )
+    assert loaded.twitch_test_sender_token_path == (
+        tmp_path / ".local/secrets/twitch-test-sender-token.bin"
+    )
     assert loaded.llm_api_key_path == (
         tmp_path / ".local/secrets/llama-server-api-key.txt"
     )

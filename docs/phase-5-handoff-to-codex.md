@@ -1,6 +1,6 @@
 # Phase 5 交接文件（交給 Codex）
 
-更新日期：2026-09-14
+更新日期：2026-09-15
 專案目錄：`F:\user\Documents\Workspace\AI Vtuber`
 交接對象：接手繼續施工的 Codex（或任何後續工程代理人）
 
@@ -26,8 +26,8 @@
 
 完整原始需求見專案根目錄 `PROJECT_BRIEF.md`；那是最初的研究與可行性報告，
 包含分階段規劃（Phase 0～7）。**Phase 5 只負責把 Phase 1～4 已經各自驗證
-過的元件串起來**，不負責重做任何一個元件，也不負責 Phase 6（OBS）與
-Phase 7（更進階功能）。
+過的元件串起來**，不負責重做任何一個元件，也不負責 Phase 6（直播安全、
+最小 OBS 整合與直播穩定性）或 Phase 7（品質與自動化）。
 
 ### 目前各 Phase 狀態
 
@@ -38,15 +38,17 @@ Phase 7（更進階功能）。
 | Phase 2 | Twitch Device Code Grant、DPAPI token、EventSub、Helix | 完成 |
 | Phase 3 | 本地 LLM（Gemma 4 12B／llama.cpp）、結構化輸出、白名單 | 完成 |
 | Phase 4 | 本地 TTS（eSpeak NG）、PCM/WAV、PortAudio 播放、字幕、MouthOpen | 完成 |
-| **Phase 5** | **整合成 AI VTuber（orchestration）** | **程式與離線測試完成；實機驗收尚未開始** |
-| Phase 6 | OBS 整合 | 未開始，本輪不做 |
-| Phase 7 | 進階功能（Raid、Channel Points 等額外 EventSub 訂閱） | 未開始，本輪不做 |
+| **Phase 5** | **整合成 AI VTuber（orchestration）** | **核心互動鏈路實機驗收已通過；程式與文件已隨收尾提交同步** |
+| Phase 6 | 直播安全、最小 OBS 整合、受控直播與 4～8 小時穩定性驗收 | 未開始，本輪不做 |
+| Phase 7 | 品質與自動化（obs-websocket、額外事件、高品質語音等） | 未開始，本輪不做 |
 
 **Phase 5 的驗收標準是「真實 Twitch → LLM → VTS → TTS → Twitch 至少跑一小時，
-且延遲、RAM、VRAM 都有量測，VTS／MouthOpen 沒有降級」。目前只完成到「離線
-mock/unit test 162 個通過」，尚未執行任何一次成功的實機單輪、連續或一小時
-測試。這是接手時最需要先確認清楚的事，不要把離線測試通過誤讀成 Phase 5
-已經完工。**
+且延遲、RAM、VRAM 都有量測，VTS／MouthOpen 沒有降級」。2026-09-15 的正式報告已完成
+60／60 輪、運行 3,616.69 秒，且 `phase5_hour_acceptance: passed`。目前工作目錄的完整
+離線驗證為 168 個通過；實機與離線證據已分開保存。**
+
+**這一小時是核心互動鏈路實機驗收，不啟動 OBS 或直播。** 它不量測編碼、RTMP、
+掉幀、bitrate 或觀眾端影音，不能替代 Phase 6 的直播穩定性驗收。
 
 ---
 
@@ -81,7 +83,7 @@ mock/unit test 162 個通過」，尚未執行任何一次成功的實機單輪�
      事不屬於工程任務，需要使用者另外確認。
 
 3. **不得做的架構或範圍變更**：
-   - 不加入 OBS（Phase 6 範圍）。
+   - 不加入 OBS 或直播輸出（Phase 6 範圍）。
    - 不提前做 Phase 6 或 Phase 7 的功能（例如 Raid、Channel Points 等額外
      EventSub 訂閱、多模型支援等）。
    - 不重做 VTube Studio 架構、NightRain 校正、Twitch 驗證流程、LLM 推論
@@ -265,6 +267,10 @@ Request #1 已合併至 `DrizzlingNight/AI-Vtuber` 的 `main`；本機主工作�
 - 正式整合指令 `run`（持續執行完整流程，需要 `--test-channel`）。
 - `phase5-smoke`（有限次數／有 timeout 的驗收指令，會產生 JSON 與繁體中文
   Markdown 報告）。
+- `twitch-test-sender-auth`／`twitch-test-sender-validate`：為 Phase 5 自動輸入驅動器
+  建立及驗證第二帳號的獨立 DPAPI 授權，不覆蓋主頻道 token。
+- `phase5-smoke --auto-drive`：由第二帳號送固定安全測試句；只接受該帳號的 EventSub
+  訊息，避免其他聊天室使用者污染驗收輪次。
 - 前置條件檢查：缺少必要授權檔、模型檔、runtime 執行檔、或 `--test-channel`
   與目前 Twitch 授權身份不符時，直接持久化 `blocked` 報告，而不是讓程式
   崩潰或印出不完整的錯誤。
@@ -311,14 +317,51 @@ playback/output、VTS lipsync 的測試。**全部離線測試結果：162 個�
 - 將本機 `main` 快轉同步至已合併 PR #1 的 `17a9e77`。
 - 校正 README、一頁式結論及工作紀錄頂端的 Git 狀態，清楚區分「程式已同步」
   與「實機驗收仍未完成」。
-- 新增本交接文件、根目錄 `AGENTS.md`，以及 repo 級
-  `.agents/skills/continue-ai-vtuber-phase5/SKILL.md`。
+- 新增本交接文件、根目錄 `AGENTS.md`，以及當時名為
+  `.agents/skills/continue-ai-vtuber-phase5/SKILL.md` 的 repo skill；該階段型入口已在
+  Phase 5 完成後由第 6.9 節的長期 skill 取代。
 - skill 已通過 `skill-creator` 的 `quick_validate.py`；同步後完整離線驗證仍為
   **162 個通過**，`compileall`、`pip check` 與 `git diff --check` 也通過。
 
+### 6.7 第二帳號自動驗收驅動器
+
+後續確認人工逐則按 Enter 不符合可重跑的自動驗收需求，因此增加獨立測試發送器：
+
+- 主帳號仍負責 `drizzlingnight` 的 EventSub、LLM 回覆與 Helix 發送。
+- 第二帳號另存於 `.local/secrets/twitch-test-sender-token.bin`，只用既有
+  `user:read:chat`／`user:write:chat`，不取得密碼、不覆蓋主帳號授權。
+- 固定安全測試句由 Helix 發出；每則等前一輪留下結果後才繼續。一小時模式將 60 則
+  從第一則到最後一則分散 3600 秒。
+- 自動模式只接受第二帳號的訊息；其他聊天室訊息不進入驗收佇列。
+- 這是測試驅動器，不是 Phase 7 的正式 bot 帳號，也不會開台或啟動 OBS。
+
+### 6.8 實機驗收收尾
+
+- 啟動前先完成不送往 Twitch／VTS 的本機 LLM 結構化預熱，避免首次 prompt evaluation
+  超過聊天室訊息 TTL。
+- 驅動器使用既有繁中評測資料中標註為 `reply` 的 60 句唯一自然聊天，不加入會被安全
+  規則判定為純測試訊息的前綴。
+- Phase 5 只讓 LLM 選擇 `neutral` 或已有 `emotion_actions` 本機映射的情緒，避免模型
+  產生無法由 NightRain 執行的非中性情緒後才降級；沒有捏造或覆寫本機 VTS 資源。
+- 正式單輪 1／1、連續 5／5、一小時 60／60 均通過；詳細指標與保留的失敗證據見
+  `docs/phase-5-work-log.md`，正式報告位於 `.local/benchmarks/`。
+
+### 6.9 Phase 與 skill 責任重整
+
+- Phase 文件負責該里程碑的輪數、時數、執行順序、指標門檻與完成狀態；skill 只保存
+  跨階段可重用的安全操作、診斷與量測方法。
+- 淘汰 `$continue-ai-vtuber-phase5`，將長期有效的核心管線規則移至
+  `$operate-ai-vtuber-orchestration`；Phase 5 的 60 輪／3,600 秒判定仍只留在本文件、
+  `docs/phase-5-result.md`、`docs/phase-5-work-log.md` 與正式報告。
+- 將 Twitch skill 統一為 `$operate-ai-vtuber-twitch`。第二帳號是可跨階段使用的外部測試
+  輸入來源；如何授權、收發及保護 token 屬於 Twitch skill，測試規模與通過門檻則屬於
+  各 Phase 文件。
+- 沒有建立 Phase 6 專屬 skill。未來只有在 OBS 或串流施工形成已驗證、可重複使用的操作
+  流程後，才以不綁 Phase 編號與驗收時數的 skill 保存。
+
 ---
 
-## 7. Phase 5 驗收條件（尚未達成，請勿誤判）
+## 7. Phase 5 驗收條件（已達成，但不等於直播穩定性）
 
 `report.py` 對「一小時驗收通過」的判定，**不是**「命令執行超過一小時」，
 而是同時滿足：
@@ -327,6 +370,7 @@ playback/output、VTS lipsync 的測試。**全部離線測試結果：162 個�
   收到幾則訊息就算數）。
 - `measurements_complete: true`（首 token、完整決策、開始送出 PCM、播放
   完成的延遲欄位都必須存在且順序正確）。
+- `input_driver_complete: true`，且第二帳號已自動送出要求的 60 則測試訊息。
 - system RAM、`llama-server` working set 與 GPU VRAM 都有實際量測值；GPU
   utilization 也會寫入報告，但目前不是 `measurements_complete` 的硬性欄位。
 - VTS／MouthOpen 全程沒有降級（沒有連線中斷、沒有動作被拒絕、沒有復位
@@ -335,6 +379,9 @@ playback/output、VTS lipsync 的測試。**全部離線測試結果：162 個�
 - 只有以上全部成立，報告裡的 `phase5_hour_acceptance` 欄位才會是
   `"passed"`；否則會是 `"not_completed"`、`"blocked"`、`"failed"` 或
   `"timed_out"` 之一。
+
+以上條件只判定核心互動鏈路。現有報告沒有 OBS、編碼器、RTMP、掉幀、bitrate 或
+觀眾端影音欄位；即使 `phase5_hour_acceptance == "passed"`，也不能寫成直播穩定性通過。
 
 **歷史實機狀態：兩次 smoke 嘗試都在前置檢查階段停止（結束碼 2，
 `status: "blocked"`），完成 0 輪，沒有任何延遲、RAM、VRAM 的實際量測。**
@@ -345,6 +392,7 @@ playback/output、VTS lipsync 的測試。**全部離線測試結果：162 個�
 ```text
 .local\secrets\vts-token.json
 .local\secrets\twitch-token.bin
+.local\secrets\twitch-test-sender-token.bin
 .local\secrets\llama-server-api-key.txt
 config\actions.local.yaml
 .local\runtime\llama.cpp\llama-server.exe
@@ -356,11 +404,19 @@ models\gemma-4-12b-it-qat-q4_0.gguf
 以及一個明確、已授權、且與 Twitch 目前登入身份一致的測試頻道登入名稱
 （由 `--test-channel` 參數指定）。
 
-2026-09-14 交接時只以路徑存在性重新核對（沒有讀取任何憑證內容）：上述八項資源在
+2026-09-14 原始交接時只以路徑存在性重新核對（沒有讀取任何憑證內容）：原有八項資源在
 主工作目錄均已存在。不過當時未偵測到 VTube Studio 或 `llama-server` 正在執行，
 也沒有取得本次實機測試要使用的明確頻道名稱。因此前一次 `blocked` 報告仍是歷史事實，
 但下一位接手者不應再假設檔案缺失；應重新啟動服務、核對授權身份與頻道後，從單輪測試
 開始取得新的正式證據。
+
+第二帳號授權檔是後續新增的第九項前置條件；必須由使用者在可見終端完成
+`twitch-test-sender-auth`，不得以主帳號 token 或人工訊息替代。
+
+上述 blocked 是保留的歷史證據，不是目前結論。第二帳號後續已完成獨立授權；
+`.local/benchmarks/phase5-one-hour.json` 已證明 `status` 與
+`phase5_hour_acceptance` 均為 `passed`、60／60 輪完成、量測與驅動紀錄完整、VTS
+6,140／6,140 次探測在線且錯誤數為 0。
 
 ---
 
@@ -373,17 +429,16 @@ models\gemma-4-12b-it-qat-q4_0.gguf
 - Pull Request #1 已於 2026-09-14 合併，merge commit 為 `17a9e77`。
 - 本機 `F:\user\Documents\Workspace\AI Vtuber` 的 `main` 已快轉至 `17a9e77`，
   並與 `origin/main` 一致。
-- 本交接文件與 repo 級 Codex skill 是合併後新增的交接變更；接手前仍應以
-  `git status --short --branch` 及 `git log -5 --oneline --decorate` 核對當下狀態，
-  不要只依賴這份文件中的提交編號。
+- 本次 Phase 5 收尾提交包含第二帳號自動驅動、LLM 預熱、可執行情緒限制、正式驗收後
+  文件與長期 skill 重整，並同步至本機與遠端 `main`；實際提交編號仍以
+  `git status --short --branch` 及 `git log -5 --oneline --decorate` 為準。
 
 ---
 
 ## 9. 建議的下一步（給 Codex 接手時的具體順序）
 
-1. **在主工作目錄核對主線。** 目前 PR 已合併且本機 `main` 已同步；先確認
-   `git status` 沒有意外變更、`main` 與 `origin/main` 沒有分歧。不要重新開分支
-   重做已合併的 Phase 5 orchestration。
+1. **在主工作目錄核對主線。** Phase 5 已完成並同步；先確認 `git status` 沒有意外
+   變更、`main` 與 `origin/main` 沒有分歧。不要重新開分支重做既有 orchestration。
 2. **在 `F:\user\Documents\Workspace\AI Vtuber` 這個真正的工作目錄**執行
    離線測試：
    ```powershell
@@ -392,25 +447,18 @@ models\gemma-4-12b-it-qat-q4_0.gguf
    .\.venv\Scripts\python.exe -m pytest
    ```
    必須維持 162 個以上全數通過，才能繼續下一步。
-3. **確認本機資源齊全**（見第 7 節清單），並確認 VTube Studio 已開啟、載入
-   NightRain 模型且已完成 Phase 1 校正，Gemma 4／llama.cpp 依 Phase 3 既有
-   設定啟動（`context_size=4096`、`gpu_layers=28`、`threads=12`，見
-   `config/app.yaml` 的 `llm` 區塊），eSpeak NG runtime 存在。
-4. **依序執行實機驗收，不要跳步**：
-   - 單輪：`phase5-smoke --test-channel <頻道> --messages 1 --timeout 600`
-   - 連續：`phase5-smoke --test-channel <頻道> --messages 5 --timeout 900`
-   - 一小時：`phase5-smoke --test-channel <頻道> --messages 60 --timeout 4200`
-     （由另一個帳號在測試聊天室分批送訊息，讓命令實際持續 3600 秒以上，
-     不是把訊息一次塞完）
+3. **不要例行重跑已通過的一小時驗收。** 只有使用者要求重新稽核，或後續修改可能影響
+   核心鏈路時，才確認第 7 節本機資源並依序重跑：
+   - 單輪：`phase5-smoke --test-channel <頻道> --messages 1 --timeout 600 --auto-drive`
+   - 連續：`phase5-smoke --test-channel <頻道> --messages 5 --timeout 900 --auto-drive`
+   - 一小時：`phase5-smoke --test-channel <頻道> --messages 60 --timeout 4200 --auto-drive --drive-duration 3600`
    每一步都要看報告的 `status`／`phase5_hour_acceptance` 欄位，不能只看
    結束碼或「有沒有印出東西」。
-5. **只有在報告明確顯示 `phase5_hour_acceptance: "passed"` 後**，才能在
-   `docs/phase-5-result.md` 與 `README.md` 更新結論為「Phase 5 已完成」。
-   在那之前，任何離線測試結果都不能拿來替代實機證據。
-6. **若要繼續 Phase 6（OBS）或 Phase 7（進階 EventSub 訂閱、更多動作類型
-   等）**，必須先完成第 4～5 步的實機驗收，且需要使用者另外確認範圍，
-   不要自行擴大範圍。
-7. **若要啟用 MeloTTS 或任何非 eSpeak NG 的語音**，必須先由使用者完成新的
+4. **若要繼續 Phase 6**，由使用者另外確認範圍，再依 `PROJECT_BRIEF.md` 建立該階段的
+   施工與驗收文件。不要從通用 skill 推導或複製 Phase 5 的輪數、時數與通過門檻。
+5. **Phase 7** 才加入 obs-websocket 場景／字幕自動化、額外 EventSub、品質升級與
+   獨立 bot 帳號；不要為了測試 Phase 6 而提前實作這些功能。
+6. **若要啟用 MeloTTS 或任何非 eSpeak NG 的語音**，必須先由使用者完成新的
    聲音權利與授權查證，這不是工程判斷可以自行決定的事。
 
 ---
@@ -422,6 +470,8 @@ models\gemma-4-12b-it-qat-q4_0.gguf
 - ❌「命令跑了超過一小時就算通過一小時驗收」——不對，還要看
   `completed_turns`、`measurements_complete`、`phase5_hour_acceptance`
   是否都達標。
+- ❌「Phase 5 一小時通過就代表直播穩定」——不對，Phase 5 沒有 OBS、編碼、RTMP、
+  掉幀或觀眾端影音證據；這些必須在 Phase 6 的完整直播環境另行驗收。
 - ❌「隔離 worktree 缺資源就直接把測試通過的邏輯 mock 掉，改成永遠回傳
   成功」——不對，這樣會讓報告失真，等於偽造驗收證據。
 - ❌「交接文件寫 main 已同步，所以不用核對」——不對；文件只記錄交接當下
@@ -433,14 +483,23 @@ models\gemma-4-12b-it-qat-q4_0.gguf
 
 ## 11. Codex 專案指令與 skill
 
-交接已把長期規則分成兩層，兩者都在 Git 內：
+交接將專案責任分成四層：`AGENTS.md` 保存全專案安全邊界，skill 保存跨階段可重用操作，
+Phase 文件保存里程碑驗收條件，`.local/benchmarks/` 保存每次實機證據。前兩者與 Phase
+文件都在 Git 內，實機報告維持本機且不受 Git 追蹤：
 
 - 根目錄 `AGENTS.md`：每次從此 repository 啟動 Codex 時載入的短版專案邊界，
-  包含先讀本文件、保護憑證、聲音權利、Phase 範圍與基本驗證命令。
-- `.agents/skills/continue-ai-vtuber-phase5/SKILL.md`：當任務涉及 Phase 5
-  orchestration、`phase5-smoke`、實機驗收或完成判定時使用的完整工作流程。
+  包含保護憑證、聲音權利、開台授權、Phase／skill 分界與基本驗證命令。
+- `.agents/skills/operate-ai-vtuber-orchestration/SKILL.md`：核心管線啟停、整合 smoke、
+  取消收尾、故障隔離與量測；不定義 Phase 專屬輪數、時數或完成門檻。
+- `.agents/skills/calibrate-ai-vtuber-vts/SKILL.md`：VTS 模型資源盤點、映射校正、
+  smoke 與 talk-demo 驗證。
+- `.agents/skills/operate-ai-vtuber-twitch/SKILL.md`：主帳號與外部測試帳號的 Twitch
+  Device Code Grant、DPAPI token、EventSub 收訊、Helix 發送與重連。
+- `.agents/skills/benchmark-ai-vtuber-llm/SKILL.md`：Gemma／llama.cpp 狀態、結構化
+  輸出與 110 組繁中 benchmark。
 
-可在 Codex 中明確輸入 `$continue-ai-vtuber-phase5` 觸發；任務描述與 skill 的
-description 相符時也可自動載入。若 skill 未出現在選擇器，先確認 Codex 的工作目錄位於
-本 repository，再重新開啟工作階段。skill 只保存流程與安全邊界，不包含任何本機憑證、
-頻道名稱、模型權重或 benchmark 私有資料。
+可在 Codex 中明確輸入 `$operate-ai-vtuber-orchestration` 或
+`$operate-ai-vtuber-twitch` 觸發；任務描述與 skill 的 description 相符時也可自動載入。
+若 skill 未出現在選擇器，先確認 Codex 的工作目錄位於本 repository，再重新開啟工作階段。
+skill 只保存跨階段可重用的操作與安全邊界，不包含任何本機憑證、頻道名稱、模型權重、
+benchmark 私有資料，亦不保存 Phase 專屬驗收時數與完成狀態。
